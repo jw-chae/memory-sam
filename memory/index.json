@@ -1,0 +1,28 @@
+{
+  "items": [
+    {
+      "id": 23,
+      "image_path": "item_23/image.png",
+      "mask_path": "item_23/mask.png",
+      "features_path": "item_23/features.npy",
+      "created_at": "2025-05-14T18:47:56.735090",
+      "patch_features_path": "item_23/patch_features.npy",
+      "metadata": {
+        "timestamp": "2025-05-14 18:47:56.602769",
+        "source": "direct_creation",
+        "original_width": 2816,
+        "original_height": 2112,
+        "points": [
+          [
+            240,
+            414
+          ]
+        ],
+        "point_labels": [
+          1
+        ]
+      }
+    }
+  ],
+  "next_id": 24
+}

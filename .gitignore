@@ -9,3 +9,14 @@ _C.*
 outputs/*
 checkpoints/*.pt
 demo/backend/checkpoints/*.pt
+
+# Weights (added by upload script)
+**/*.pt
+**/*.pth
+**/*.ckpt
+**/*.safetensors
+**/*.onnx
+**/*.h5
+memory/*.bin
+checkpoints/**
+demo/backend/checkpoints/**
