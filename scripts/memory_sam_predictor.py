@@ -313,7 +313,8 @@ class MemorySAMPredictor:
                 self.dinov3_matcher = Dinov3Matcher(
                     repo_name=dinov3_matching_repo,
                     model_name=dinov3_matching_model,
-                    device=device
+                    device=device,
+                    half_precision=True
                 )
                 print("DINOv3 Matcher initialized successfully")
             except Exception as e:
@@ -398,7 +399,16 @@ class MemorySAMPredictor:
         
         # Extract features using DINOv3
         with torch.no_grad():
-            features = self.dinov3_model.forward_features(input_tensor)
+            try:
+                features = self.dinov3_model.forward_features(input_tensor)
+            except RuntimeError as e:
+                if "CUDA out of memory" in str(e) and self.device.type == "cuda":
+                    torch.cuda.empty_cache()
+                    print("Retrying DINOv3 forward_features on CPU due to OOM...")
+                    features = self.dinov3_model.cpu().forward_features(input_tensor.cpu())
+                    self.dinov3_model = self.dinov3_model.to(self.device)
+                else:
+                    raise
             # Get CLS token (first token)
             cls_features = features['x_norm_clstoken'].cpu().numpy()
         
@@ -1552,8 +1562,13 @@ class MemorySAMPredictor:
             except Exception as e:
                 print(f"[visualize_sparse_matches] RANSAC filtering error: {e}")
             
-            # Print matching results
-            print(f"Foreground matches: {len(fg_coords1)}, background matches: {len(bg_coords1)}, total matches: {len(coords1)}")
+            # Print matching results with similarity stats
+            def _stats(arr):
+                if not arr:
+                    return (0.0, 0.0)
+                return (float(np.mean(arr)), float(np.std(arr)))
+            m_mean, m_std = _stats(match_similarities)
+            print(f"Foreground matches: {len(fg_coords1)}, background matches: {len(bg_coords1)}, total matches: {len(coords1)}; sim_mean={m_mean:.3f}, sim_std={m_std:.3f}")
             
             # Optional: crop black borders introduced by letterbox padding (for visualization only)
             def _crop_black_borders(img: np.ndarray):
