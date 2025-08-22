@@ -2,6 +2,8 @@ import os
 import glob
 import tempfile
 import shutil
+import subprocess
+import sys
 from typing import List, Dict, Tuple, Any, Optional, Union
 from pathlib import Path
 
@@ -16,19 +18,36 @@ class FileManager:
         Returns:
             선택된 디렉토리 경로 (또는 취소 시 빈 문자열)
         """
-        # Gradio 환경에서는 tkinter가 메인 스레드가 아니어서 실패할 수 있으므로
-        # zenity 기반의 브라우저를 우선 시도한다.
+        # 1) tkinter를 별도 서브프로세스로 실행해 메인 스레드 제약을 회피
         try:
-            import subprocess
-            result = subprocess.run(['zenity', '--file-selection', '--directory'],
-                                    capture_output=True, text=True)
+            py = sys.executable or "python3"
+            code = (
+                "import tkinter as tk;"
+                "from tkinter import filedialog;"
+                "root=tk.Tk();root.withdraw();"
+                "p=filedialog.askdirectory(title='폴더 선택');"
+                "print(p,end='')"
+            )
+            result = subprocess.run([py, "-c", code], capture_output=True, text=True)
             if result.returncode == 0:
-                return result.stdout.strip()
+                path = result.stdout.strip()
+                if path:
+                    return path
+        except Exception as e:
+            print(f"tkinter(subprocess) 폴더 브라우저 실패: {e}")
+
+        # 2) 리눅스 환경에서 zenity가 있으면 사용
+        try:
+            if shutil.which("zenity"):
+                result = subprocess.run(['zenity', '--file-selection', '--directory'],
+                                        capture_output=True, text=True)
+                if result.returncode == 0:
+                    return result.stdout.strip()
         except Exception as e:
             print(f"zenity 기반 폴더 브라우저 실패: {e}")
-        
-        # 최종 폴백: 입력 실패 시 빈 문자열 반환
-        print("폴더 브라우저 열기 실패: main thread is not in main loop (tkinter 미사용)" )
+
+        # 3) 실패 시 빈 문자열 반환
+        print("폴더 브라우저 열기 실패: 지원되는 브라우저를 찾지 못했습니다.")
         return ""
     
     @staticmethod
