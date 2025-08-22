@@ -1535,6 +1535,22 @@ class MemorySAMPredictor:
             coords1 = fg_coords1 + bg_coords1
             coords2 = fg_coords2 + bg_coords2
             match_similarities = fg_match_similarities + bg_match_similarities
+
+            # Geometric consistency filtering (RANSAC affine)
+            try:
+                if len(coords1) >= 4 and len(coords2) >= 4:
+                    pts1 = np.array(coords1, dtype=np.float32)
+                    pts2 = np.array(coords2, dtype=np.float32)
+                    M, inliers = cv2.estimateAffinePartial2D(pts1, pts2, method=cv2.RANSAC, ransacReprojThreshold=5.0, maxIters=2000, confidence=0.99)
+                    if inliers is not None:
+                        inliers = inliers.reshape(-1).astype(bool)
+                        if inliers.sum() >= 3:
+                            coords1 = [tuple(map(int, p)) for p in pts1[inliers]]
+                            coords2 = [tuple(map(int, p)) for p in pts2[inliers]]
+                            match_similarities = [match_similarities[i] for i, m in enumerate(inliers) if m]
+                            print(f"[visualize_sparse_matches] RANSAC filtered: {inliers.sum()} / {len(inliers)} inliers")
+            except Exception as e:
+                print(f"[visualize_sparse_matches] RANSAC filtering error: {e}")
             
             # Print matching results
             print(f"Foreground matches: {len(fg_coords1)}, background matches: {len(bg_coords1)}, total matches: {len(coords1)}")
