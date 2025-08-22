@@ -107,26 +107,30 @@ class Dinov3Matcher:
 
         return padded_tensor, grid_size, resize_scale
     
-    def prepare_mask(self, mask_image_numpy: np.ndarray, grid_size: Tuple[int, int], resize_scale: float) -> np.ndarray:
+    def prepare_mask(self, mask_image_numpy: np.ndarray, grid_size: Tuple[int, int], _unused: float = 1.0) -> np.ndarray:
         """
-        마스크 이미지를 DINOv3 그리드 크기로 조정
-        
-        Args:
-            mask_image_numpy: 마스크 이미지
-            grid_size: 그리드 크기
-            resize_scale: 크기 조정 비율
-            
-        Returns:
-            조정된 마스크 (1D 배열)
+        마스크를 이미지 전처리(종횡비 유지 + 우/하단 패딩)와 동일한 규칙으로 축소하여
+        주어진 DINOv3 그리드 크기(grid_size)에 맞춥니다.
         """
-        cropped_mask_image_numpy = mask_image_numpy[
-            :int(grid_size[0]*self.model.patch_size*resize_scale), 
-            :int(grid_size[1]*self.model.patch_size*resize_scale)
-        ]
-        image = Image.fromarray(cropped_mask_image_numpy)
-        resized_mask = image.resize((grid_size[1], grid_size[0]), resample=Image.Resampling.NEAREST)
-        resized_mask = np.asarray(resized_mask).flatten()
-        return resized_mask
+        # 1) 원본 마스크를 smaller_edge_size 기준으로 리사이즈
+        h, w = mask_image_numpy.shape[:2]
+        if h == 0 or w == 0:
+            return np.zeros((grid_size[0] * grid_size[1],), dtype=np.uint8)
+
+        scale = self.smaller_edge_size / min(w, h)
+        new_w = max(1, int(round(w * scale)))
+        new_h = max(1, int(round(h * scale)))
+        mask_resized = cv2.resize(mask_image_numpy.astype(np.uint8), (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+
+        # 2) 패치 배수에 맞춰 우/하단 패딩 (prepare_image와 동일 규칙)
+        pad_w = (self.model.patch_size - new_w % self.model.patch_size) % self.model.patch_size
+        pad_h = (self.model.patch_size - new_h % self.model.patch_size) % self.model.patch_size
+        mask_padded = cv2.copyMakeBorder(mask_resized, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=0)
+
+        # 3) 그리드 크기로 다운샘플링
+        target_w, target_h = grid_size[1], grid_size[0]
+        mask_grid = cv2.resize(mask_padded, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+        return mask_grid.flatten()
     
     def extract_features(self, image_tensor: torch.Tensor) -> np.ndarray:
         """
