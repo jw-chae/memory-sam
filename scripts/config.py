@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -21,7 +21,7 @@ class MatchingConfig:
 
 @dataclass
 class AppConfig:
-    resize: ResizeConfig = ResizeConfig()
-    matching: MatchingConfig = MatchingConfig()
+    resize: ResizeConfig = field(default_factory=ResizeConfig)
+    matching: MatchingConfig = field(default_factory=MatchingConfig)
 
 
