@@ -7,6 +7,7 @@ from typing import List, Dict, Tuple, Any, Optional, Union
 import tempfile
 import shutil
 import matplotlib.pyplot as plt
+import random
 
 def visualize_mask(image: np.ndarray, mask: np.ndarray, alpha: float = 0.5) -> np.ndarray:
     """
@@ -105,7 +106,7 @@ class SparseMatchVisualizer:
     
     def visualize_matches(self, image1, image2, mask1=None, mask2=None, 
                            skip_clustering=False, hybrid_clustering=False,
-                           save_path=None, max_matches=50):
+                           save_path=None, max_matches=50, match_background=True):
         """두 이미지 간의 스파스 매칭을 시각화"""
         try:
             # 클러스터링 설정을 현재 상태로 저장 (원본 설정 백업)
@@ -122,8 +123,19 @@ class SparseMatchVisualizer:
                 skip_clustering=skip_clustering,  # 명시적 전달
                 hybrid_clustering=hybrid_clustering,  # 명시적 전달
                 max_matches=max_matches,
-                save_path=save_path
+                save_path=save_path,
+                match_background=match_background
             )
+
+            # 전경 KMeans 중심 포인트가 있으면 시각화 이미지 위에 표시(하이라이트)
+            try:
+                if hasattr(self.memory_sam, 'last_fg_prompt_points') and self.memory_sam.last_fg_prompt_points is not None:
+                    vis = sparse_vis.copy()
+                    for pt in self.memory_sam.last_fg_prompt_points:
+                        cv2.circle(vis, (int(pt[0]), int(pt[1])), 6, (0, 255, 255), 2)
+                    sparse_vis = vis
+            except Exception as e:
+                print(f"Highlight KMeans centers failed: {e}")
             
             # 원래 설정 복원
             self.memory_sam.skip_clustering = original_skip
@@ -204,23 +216,22 @@ def prepare_input_data(files: Union[List[Any], str, Path], folder_path: str = ""
         print(f"Using direct folder path: {folder_path}")
         return folder_path
     
-    # Files as list (folder upload case)
+    # Files as list
     if isinstance(files, list):
         if len(files) == 0:
             return None
+        # 단일 파일 업로드는 파일 경로 그대로 반환 (폴더 처리 방지)
+        if len(files) == 1 and hasattr(files[0], 'name'):
+            return files[0].name
         
-        # Create temporary directory
+        # 2개 이상일 때만 임시 폴더 생성하여 폴더 처리로 전환
         temp_dir = tempfile.mkdtemp()
         try:
-            # Copy all files to temporary directory
             for f in files:
                 shutil.copy(f.name, temp_dir)
-            
-            # Process temporary directory path as input
             print(f"Folder processing mode: copied {len(files)} files to temporary directory {temp_dir}")
             return temp_dir
         except Exception as e:
-            # Clean up temporary directory
             shutil.rmtree(temp_dir)
             print(f"Error copying files: {e}")
             raise e
@@ -232,4 +243,7 @@ def prepare_input_data(files: Union[List[Any], str, Path], folder_path: str = ""
         if files is not None:
             return files.name
         return None
+
+
+ 
     

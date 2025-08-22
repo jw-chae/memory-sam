@@ -273,7 +273,7 @@ class MemoryGradioInterface:
                 )
                 
                 # 결과가 정상적으로 반환된 경우
-                if len(result_gallery_items) >= 12 and result_gallery_items[0] is not None:  # 12개 결과 (스파스 매칭 시각화 포함)
+                if isinstance(result_gallery_items, list) and result_gallery_items:
                     # 결과 아코디언 열기 상태 설정
                     self._update_accordion_state(True)
                     # 처리된 이미지 목록 저장
@@ -488,6 +488,30 @@ class MemoryGradioInterface:
                                 interactive=False,
                                 elem_id="match_info"
                             )
+                            
+                            # 스파스 매칭 시각화 섹션 추가
+                            with gr.Accordion("스파스 매칭 시각화", open=True):
+                                sparse_match_vis = gr.Image(
+                                    label="현재 설정에 따른 스파스 매칭 시각화",
+                                    type="numpy",
+                                    height=400,
+                                    elem_id="sparse_match_vis"
+                                )
+                                with gr.Row():
+                                    with gr.Column():
+                                        img1_points = gr.Image(
+                                            label="메모리 이미지 특징점",
+                                            type="numpy",
+                                            height=300,
+                                            elem_id="img1_points"
+                                        )
+                                    with gr.Column():
+                                        img2_points = gr.Image(
+                                            label="현재 이미지 특징점",
+                                            type="numpy",
+                                            height=300,
+                                            elem_id="img2_points"
+                                        )
                     
                     with gr.Row():
                         delete_memory_btn = gr.Button("메모리 초기화", variant="stop", elem_id="delete_memory_btn")
@@ -522,6 +546,11 @@ class MemoryGradioInterface:
                 match_vis = None
                 match_info_text = "메모리 항목이 선택되었습니다."
                 
+                # 스파스 매칭 시각화 초기화
+                sparse_vis = None
+                img1_vis = None
+                img2_vis = None
+                
                 # 항목 ID 저장
                 item_id = info.get("id") if info else None
                 
@@ -533,6 +562,19 @@ class MemoryGradioInterface:
                                 self.memory_sam.current_image
                             )
                             match_info_text = f"ID {item_id}와 현재 이미지 간의 특징 매칭 시각화" if match_vis is not None else "특징 매칭을 시각화할 수 없습니다."
+                            
+                            # 스파스 매칭 시각화 생성
+                            try:
+                                # 메모리 항목 데이터 로드
+                                item_data = self.memory_manager_module.memory_system.load_item_data(item_id)
+                                if item_data and 'image' in item_data and 'mask' in item_data:
+                                    sparse_vis, img1_vis, img2_vis = self.memory_sam.visualize_sparse_matches(
+                                        image1=item_data['image'], image2=self.memory_sam.current_image,
+                                        mask1=item_data['mask'], mask2=self.memory_sam.current_mask,
+                                        match_background=getattr(self, 'match_background', True)
+                                    )
+                            except Exception as sparse_e:
+                                print(f"스파스 매칭 시각화 오류: {sparse_e}")
                         else:
                             match_info_text = "이 메모리 항목에는 스파스 매칭을 위한 패치 특징이 없습니다."
                     except Exception as e:
@@ -540,12 +582,12 @@ class MemoryGradioInterface:
                 else:
                     match_info_text = "스파스 매칭이 비활성화되었거나 현재 이미지가 없습니다."
                 
-                return image, info, match_vis, match_info_text, item_id
+                return image, info, match_vis, match_info_text, item_id, sparse_vis, img1_vis, img2_vis
 
             memory_display.select(
                 fn=handle_memory_select,
                 inputs=[],
-                outputs=[selected_memory_image, selected_memory_info, match_visualization, match_info, selected_item_id]
+                outputs=[selected_memory_image, selected_memory_info, match_visualization, match_info, selected_item_id, sparse_match_vis, img1_points, img2_points]
             )
             
             # 선택 항목 삭제 버튼 이벤트 설정

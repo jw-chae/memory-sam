@@ -73,164 +73,110 @@ class SegmentationModule:
                 auto_add_to_memory=auto_add_to_memory
             )
             
-            # Process basic results
-            mask_vis = (result["mask"] * 255).astype(np.uint8)
-            seg_vis = visualize_mask(result["image"], result["mask"])
+            # --- 결과 처리 로직 재구성 ---
             
-            # Prepare memory gallery items
+            # 갤러리 및 처리된 이미지 목록 초기화
             gallery_items = []
-            if result["similar_items"]:
-                for item_data in result["similar_items"]:
+            result_gallery_items = []
+            processed_images_list = []
+            
+            # 반환된 결과가 폴더 처리 결과인지 확인
+            is_folder = result.get("is_folder", False)
+            results_list = result.get("results_list") if is_folder else [result]
+
+            # 대표 결과 설정 (첫 번째 이미지의 결과 사용)
+            if not results_list:
+                 raise ValueError("Processing returned no results.")
+            
+            representative_result = results_list[0]
+            
+            # Process basic results for the representative image
+            mask_vis = (representative_result["mask"] * 255).astype(np.uint8)
+            # 마스크/이미지 크기 불일치를 자동 보정하는 예측기 메서드 사용
+            seg_vis = self.memory_sam.visualize_mask(representative_result["image"], representative_result["mask"])
+            
+            # Prepare memory gallery items from the representative result
+            if representative_result.get("similar_items"):
+                for item_data in representative_result["similar_items"]:
                     item = item_data["item"]
                     similarity = item_data["similarity"]
                     img_path = self.memory_sam.memory.memory_dir / item["image_path"]
-                    gallery_items.append((str(img_path), f"ID: {item['id']}, Similarity: {similarity:.4f}"))
+                    gallery_items.append((str(img_path), f"ID: {item['id']}, Sim: {similarity:.4f}"))
             
-            # Prepare memory info text
-            if result["similar_items"]:
-                memory_info = f"Found {len(result['similar_items'])} similar items in memory.\n"
-                for i, item_data in enumerate(result["similar_items"]):
-                    memory_info += f"Item {i+1}: ID {item_data['item']['id']}, Similarity: {item_data['similarity']:.4f}\n"
-                    
-                    # Foreground/background matching info (if available)
-                    if "foreground" in item_data:
-                        fg = item_data["foreground"]
-                        memory_info += f"   Foreground - Similarity: {fg['similarity']:.4f}, Match ratio: {fg['match_ratio']:.4f}, Mean distance: {fg['mean_distance']:.4f}\n"
-                        
-                        if "background" in item_data and item_data["background"] is not None:
-                            bg = item_data["background"]
-                            memory_info += f"   Background - Similarity: {bg['similarity']:.4f}, Match ratio: {bg['match_ratio']:.4f}, Mean distance: {bg['mean_distance']:.4f}\n"
-                    # Previous version compatibility
-                    elif "match_ratio" in item_data:
-                        memory_info += f"   Match ratio: {item_data['match_ratio']:.4f}, Mean distance: {item_data['mean_distance']:.4f}\n"
+            # 정보 텍스트 생성 (폴더 또는 단일 이미지에 따라 다르게)
+            if is_folder:
+                memory_info = f"Processed {result.get('image_count', 0)} images in folder.\n"
+                memory_info += f"Showing memory results for the first image: {Path(representative_result.get('image_path')).name}\n"
             else:
-                memory_info = "No similar items found in memory. Using default prompt."
-            
-            memory_info += f"\nSegmentation score: {result['score']:.4f}\n"
-            memory_info += f"Result path: {result['result_path']}"
-            
-            # Prepare result gallery items
-            result_gallery_items = []
-            
-            # Clean and ensure processed_images list exists
-            processed_images_list = []
-            
-            # For folder processing
-            if result.get("is_folder", False):
-                # Check if folder image paths are available
-                if hasattr(self.memory_sam, 'folder_image_paths') and self.memory_sam.folder_image_paths:
-                    folder_paths = self.memory_sam.folder_image_paths
-                    print(f"Folder processing: {len(folder_paths)} images found")
-                    
-                    # Take first image from folder as representative
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    base_path = Path(self.memory_sam.results_dir) / f"result_{timestamp}" / "all_images"
-                    base_path.mkdir(exist_ok=True, parents=True)
-                    
-                    for i, img_path in enumerate(folder_paths):
-                        try:
-                            # Process each image
-                            img_result = self.memory_sam.process_image(
-                                image_path=img_path,
-                                reference_path=reference_path,
-                                prompt_type=prompt_type,
-                                use_sparse_matching=use_sparse_matching,
-                                match_background=match_background,
-                                skip_clustering=skip_clustering
-                            )
-                            
-                            # Get image filename without extension
-                            img_filename = Path(img_path).stem
-                            
-                            # Convert to images
-                            input_img = img_result["image"]
-                            mask_img = (img_result["mask"] * 255).astype(np.uint8)
-                            overlay_img = visualize_mask(input_img, img_result["mask"])
-                            
-                            # Save images to disk
-                            input_save_path = base_path / f"{img_filename}_input.png"
-                            mask_save_path = base_path / f"{img_filename}_mask.png"
-                            overlay_save_path = base_path / f"{img_filename}_overlay.png"
-                            
-                            Image.fromarray(input_img).save(str(input_save_path))
-                            Image.fromarray(mask_img).save(str(mask_save_path))
-                            Image.fromarray(overlay_img).save(str(overlay_save_path))
-                            
-                            # Add to gallery
-                            result_gallery_items.append((str(overlay_save_path), f"{img_filename} (Score: {img_result['score']:.2f})"))
-                            
-                            # Add to processed images list with clustering settings
-                            processed_images_list.append({
-                                "filename": img_filename,
-                                "path": img_path,
-                                "input": str(input_save_path),
-                                "mask": str(mask_save_path),
-                                "overlay": str(overlay_save_path),
-                                "score": float(img_result['score']),
-                                "width": input_img.shape[1],
-                                "height": input_img.shape[0],
-                                "resize_scale": 1.0,
-                                "processing_time": 0.0,
-                                "skip_clustering": skip_clustering,
-                                "hybrid_clustering": hybrid_clustering
-                            })
-                            
-                        except Exception as e:
-                            print(f"Error processing image {img_path}: {e}")
-                
-                result_info = f"Processed {len(processed_images_list)} images.\n"
-                result_info += f"Result path: {base_path}"
-                
+                memory_info = ""
+
+            if representative_result.get("similar_items"):
+                memory_info += f"Found {len(representative_result['similar_items'])} similar items.\n"
             else:
-                # Single file processing
-                print("Single image processing result")
-                
-                # Save the files to disk if they don't exist
-                overlay_path = Path(str(result['result_path'])) / "overlay.png"
-                input_path = Path(str(result['result_path'])) / "input.png"
-                mask_path = Path(str(result['result_path'])) / "mask.png"
-                
-                if not overlay_path.exists():
-                    Image.fromarray(seg_vis).save(str(overlay_path))
-                
-                if not input_path.exists():
-                    Image.fromarray(result["image"]).save(str(input_path))
-                
-                if not mask_path.exists():
-                    Image.fromarray(mask_vis).save(str(mask_path))
-                
-                # Add to gallery
-                result_gallery_items = [
-                    (str(input_path), "Input image"),
-                    (str(mask_path), "Mask"),
-                    (str(overlay_path), "Overlay")
-                ]
-                
-                # Add to processed images list with clustering settings
-                processed_images_list.append({
-                    "filename": Path(image_path).stem if isinstance(image_path, (str, Path)) else "unknown",
-                    "path": str(image_path) if isinstance(image_path, (str, Path)) else "unknown",
-                    "input": str(input_path),
-                    "mask": str(mask_path),
-                    "overlay": str(overlay_path),
-                    "score": float(result['score']),
-                    "width": result["image"].shape[1],
-                    "height": result["image"].shape[0],
-                    "resize_scale": 1.0,
-                    "processing_time": 0.0,
-                    "skip_clustering": skip_clustering,
-                    "hybrid_clustering": hybrid_clustering
-                })
-                
-                result_info = f"Processed single image.\n"
-                result_info += f"Segmentation score: {result['score']:.4f}\n"
-                result_info += f"Result path: {result['result_path']}"
+                memory_info += "No similar items found in memory. Using default prompt.\n"
+            memory_info += f"Seg. score: {representative_result['score']:.4f}\n"
+
+            # --- 결과 갤러리 및 processed_images_list 채우기 ---
             
+            # 결과 저장 기본 경로 설정
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            base_path = Path(self.memory_sam.results_dir) / f"result_{timestamp}"
+            base_path.mkdir(exist_ok=True, parents=True)
+            
+            for res in results_list:
+                try:
+                    img_path = res.get("image_path")
+                    img_filename = Path(img_path).stem if img_path else "unknown"
+                    
+                    # 이미지 데이터 가져오기
+                    original_img = res.get("original_image", res["image"])
+                    processed_img = res["image"] # 리사이즈된 이미지
+                    mask = res["mask"]
+
+                    # 시각화 및 마스크 이미지 생성 (저장용)
+                    mask_to_save = (mask * 255).astype(np.uint8)
+                    # 오버레이는 원본 기준, 크기 자동 보정 함수 사용
+                    overlay_img = self.memory_sam.visualize_mask(original_img, mask)
+                    
+                    # 파일 저장 경로 설정
+                    img_dir = base_path / img_filename
+                    img_dir.mkdir(exist_ok=True)
+                    
+                    input_save_path = img_dir / "input.png"
+                    mask_save_path = img_dir / "mask.png"
+                    overlay_save_path = img_dir / "overlay.png"
+                    
+                    # 파일 저장
+                    Image.fromarray(original_img).save(str(input_save_path))
+                    Image.fromarray(mask_to_save).save(str(mask_save_path))
+                    Image.fromarray(overlay_img).save(str(overlay_save_path))
+
+                    # 결과 갤러리에 추가
+                    result_gallery_items.append((str(overlay_save_path), f"{img_filename} (Score: {res['score']:.2f})"))
+                    
+                    # 처리된 이미지 정보 목록에 추가
+                    processed_images_list.append({
+                        "filename": img_filename,
+                        "path": img_path,
+                        "input": str(input_save_path),
+                        "mask": str(mask_save_path),
+                        "overlay": str(overlay_save_path),
+                        "score": float(res['score']),
+                        "width": original_img.shape[1],
+                        "height": original_img.shape[0],
+                        "resize_scale": res.get("actual_resize_scale", 1.0),
+                        "processing_time": 0.0, # Placeholder
+                        "skip_clustering": skip_clustering,
+                        "hybrid_clustering": hybrid_clustering
+                    })
+                except Exception as e:
+                    print(f"Error processing and saving result for {res.get('image_path')}: {e}")
+            
+            result_info = f"Processed {len(processed_images_list)} image(s).\n"
+            result_info += f"Results saved in: {base_path}"
+
             # Set default selection to first item
-            selected_original = None
-            selected_mask = None
-            selected_overlay = None
-            
+            selected_original, selected_mask, selected_overlay = (None, None, None)
             if processed_images_list:
                 first_item = processed_images_list[0]
                 selected_original = first_item["input"]
@@ -240,73 +186,21 @@ class SegmentationModule:
             # Store processed images list
             self.processed_images = processed_images_list
             
-            # Sparse matching visualization
-            sparse_match_vis = None
-            img1_points = None
-            img2_points = None
-            
-            # 스파스 매칭 시각화 생성 (일관된 설정으로)
-            if hasattr(self.memory_sam, 'similar_items') and self.memory_sam.similar_items:
-                try:
-                    # 베스트 매칭 메모리 항목 찾기
-                    best_item = self.memory_sam.similar_items[0]["item"]
-                    item_data = self.memory_sam.memory.load_item_data(best_item["id"])
-                    
-                    if "image" in item_data and "mask" in item_data:
-                        memory_image = item_data["image"]
-                        memory_mask = item_data["mask"]
-                        
-                        # 현재 클러스터링 설정으로 시각화 생성
-                        sparse_match_vis, img1_points, img2_points = self.sparse_visualizer.visualize_matches(
-                            memory_image, 
-                            result["image"], 
-                            memory_mask, 
-                            result["mask"],
-                            skip_clustering=skip_clustering,
-                            hybrid_clustering=hybrid_clustering,
-                            save_path=str(Path(result["result_path"]) / f"sparse_match_{skip_clustering}_{hybrid_clustering}.png")
-                        )
-                        
-                        print(f"스파스 매칭 시각화 생성 완료: skip={skip_clustering}, hybrid={hybrid_clustering}")
-                        
-                        # 결과에 추가
-                        result["sparse_match_visualization"] = sparse_match_vis
-                        result["img1_points"] = img1_points
-                        result["img2_points"] = img2_points
-                        
-                except Exception as e:
-                    print(f"스파스 매칭 시각화 생성 중 오류: {e}")
-                    import traceback
-                    traceback.print_exc()
-            else:
-                # 직접 결과에서 가져오기
-                sparse_match_vis = result.get("sparse_match_visualization", None)
-                img1_points = result.get("img1_points", None)
-                img2_points = result.get("img2_points", None)
-            
-            # 처리된 이미지에 스파스 매칭 시각화 추가
-            if sparse_match_vis is not None and processed_images_list:
-                for img_data in processed_images_list:
-                    img_data["sparse_match_visualization"] = sparse_match_vis
-                    img_data["img1_points"] = img1_points
-                    img_data["img2_points"] = img2_points
+            # Sparse matching visualization for the representative result
+            sparse_match_vis = representative_result.get("sparse_match_visualization")
+            img1_points = representative_result.get("img1_points")
+            img2_points = representative_result.get("img2_points")
             
             # 마지막 결과 저장
             self.last_result = {
-                "image": result["image"],
-                "mask": result["mask"],
+                "image": representative_result["image"],
+                "mask": representative_result["mask"],
                 "sparse_match_visualization": sparse_match_vis,
                 "img1_points": img1_points,
                 "img2_points": img2_points,
                 "skip_clustering": skip_clustering,
                 "hybrid_clustering": hybrid_clustering
             }
-            
-            # Add sparse matching info if available
-            if sparse_match_vis is not None:
-                memory_info += "\n\nSparse matching visualization created."
-                memory_info += f"\nResult path: {result['result_path']}/sparse_matches.png"
-                memory_info += f"\nClustering setting: {'Skip clustering (all points)' if skip_clustering else 'Hybrid clustering' if hybrid_clustering else 'Standard clustering'}"
             
             return (seg_vis, mask_vis, gallery_items, memory_info, 
                    result_gallery_items, selected_original, selected_mask, selected_overlay, result_info,

@@ -221,23 +221,49 @@ class MemoryManagerModule:
             for item_id in item_ids:
                 self.delete_memory_item(item_id)
             
-            # 인덱스 초기화
+            # 인덱스 초기화 (items 비우고 next_id 리셋)
             self.memory_sam.memory.index["items"] = []
+            if "next_id" in self.memory_sam.memory.index:
+                self.memory_sam.memory.index["next_id"] = 0
             self.memory_sam.memory._save_index()
             
-            # FAISS 인덱스 초기화
-            if hasattr(self.memory_sam.memory, 'faiss_index') and self.memory_sam.memory.faiss_index is not None:
-                # 특징 차원 유지
-                feature_dim = self.memory_sam.memory.feature_dim
-                # 새 인덱스 생성
-                import faiss
-                self.memory_sam.memory.faiss_index = faiss.IndexFlatL2(feature_dim)
-                self.memory_sam.memory.id_to_index_map = {}
-                
-                # 인덱스 저장
-                faiss_index_path = self.memory_sam.memory.faiss_index_path
-                if faiss_index_path.exists():
+            # 비어있는 item_* 폴더 및 잔여 파일 정리
+            import shutil
+            memory_dir = self.memory_sam.memory.memory_dir
+            try:
+                for entry in memory_dir.iterdir():
+                    # item_* 폴더 정리
+                    if entry.is_dir() and entry.name.startswith("item_"):
+                        shutil.rmtree(entry, ignore_errors=True)
+                    # 인덱스/FAISS 외의 루트 잔여 파일 정리
+                    elif entry.is_file() and entry.name not in {"index.json", "faiss_index.bin"}:
+                        try:
+                            entry.unlink()
+                        except Exception:
+                            pass
+            except Exception:
+                # 디렉토리 정리는 베스트 에포트
+                pass
+
+            # FAISS 인덱스 초기화/삭제
+            faiss_index_path = self.memory_sam.memory.faiss_index_path
+            try:
+                if hasattr(self.memory_sam.memory, 'faiss_index') and self.memory_sam.memory.faiss_index is not None and self.memory_sam.memory.feature_dim:
+                    # 특징 차원 유지하여 빈 인덱스로 재생성
+                    import faiss
+                    self.memory_sam.memory.faiss_index = faiss.IndexFlatL2(int(self.memory_sam.memory.feature_dim))
+                    self.memory_sam.memory.id_to_index_map = {}
+                    # 덮어쓰기 저장
                     faiss.write_index(self.memory_sam.memory.faiss_index, str(faiss_index_path))
+                else:
+                    # 차원 정보가 없거나 인덱스가 없으면 파일 자체 삭제
+                    if faiss_index_path.exists():
+                        faiss_index_path.unlink()
+                    self.memory_sam.memory.faiss_index = None
+                    self.memory_sam.memory.id_to_index_map = {}
+            except Exception:
+                # 베스트 에포트로 무시
+                pass
             
             return f"메모리가 초기화되었습니다. {len(item_ids)}개 항목이 삭제되었습니다."
         except Exception as e:

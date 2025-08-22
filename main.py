@@ -39,10 +39,10 @@ def parse_args():
     )
     
     parser.add_argument(
-        "--dinov2_model", 
+        "--dinov3_model", 
         type=str, 
-        default="facebook/dinov2-base",
-        help="사용할 DINOv2 모델"
+        default="dinov3_vitb16",
+        help="사용할 DINOv3 모델"
     )
     
     parser.add_argument(
@@ -98,7 +98,7 @@ def main():
         predictor = MemorySAMPredictor(
             model_type=args.model_type,
             checkpoint_path=args.checkpoint_path,
-            dinov2_model=args.dinov2_model,
+            dinov3_model=args.dinov3_model,
             memory_dir=memory_dir,
             results_dir=results_dir,
             device=args.device
@@ -109,7 +109,7 @@ def main():
             memory_sam_predictor=predictor,
             model_type=args.model_type,
             checkpoint_path=args.checkpoint_path,
-            dinov2_model=args.dinov2_model,
+            dinov3_model=args.dinov3_model,
             memory_dir=memory_dir,
             results_dir=results_dir
         )
@@ -128,7 +128,7 @@ def main():
         memory_ui = MemorySAMUI(
             model_type=args.model_type,
             checkpoint_path=args.checkpoint_path,
-            dinov2_model=args.dinov2_model,
+            dinov3_model=args.dinov3_model,
             memory_dir=memory_dir,
             results_dir=results_dir,
             device=args.device,

@@ -98,7 +98,21 @@ class UIComponents:
             info="클러스터링 사용 시 적용되는 최대 배경 포인트 수"
         )
         
-        return similarity_threshold, background_weight, skip_clustering, hybrid_clustering, max_positive_points, max_negative_points
+        # 전경 KMeans 중심 사용 옵션
+        use_positive_kmeans = gr.Checkbox(
+            label="전경 KMeans 중심 사용",
+            value=False,
+            info="전경 포인트 후보에서 특징 기반 KMeans 중심 n개만 사용"
+        )
+        positive_kmeans_clusters = gr.Slider(
+            minimum=1,
+            maximum=20,
+            value=5,
+            step=1,
+            label="전경 KMeans 중심 수"
+        )
+
+        return similarity_threshold, background_weight, skip_clustering, hybrid_clustering, max_positive_points, max_negative_points, use_positive_kmeans, positive_kmeans_clusters
     
     @staticmethod
     def create_progress_bar() -> gr.Progress:

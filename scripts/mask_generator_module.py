@@ -287,10 +287,9 @@ class MaskGeneratorModule:
             img_np = np.array(image)
             original_size = img_np.shape[:2]  # (높이, 너비)
             
-            # 이미지를 512x512로 리사이징
-            from ui.image_utils import ImageResizer
-            resized_img = ImageResizer.resize_image(img_np, "512x512")
-            print(f"저장용 이미지 리사이징: {original_size[1]}x{original_size[0]} -> 512x512")
+            # 원본 해상도 그대로 저장/특징 추출
+            resized_img = img_np
+            print(f"저장용 이미지 리사이징 제거: {original_size[1]}x{original_size[0]} 유지")
             
             # 마스크 사용 (전달된 마스크 또는 현재 마스크)
             mask_to_use = mask if mask is not None else self.current_mask
@@ -334,7 +333,7 @@ class MaskGeneratorModule:
                     "point_labels": self.current_point_labels
                 }
             )
-            print(f"메모리에 저장 완료: ID {memory_id}, 이미지 크기: 512x512, 마스크 크기: {mask_to_use.shape}, 원본 크기: {original_size[1]}x{original_size[0]}")
+            print(f"메모리에 저장 완료: ID {memory_id}, 이미지 크기: {resized_img.shape[1]}x{resized_img.shape[0]}, 마스크 크기: {mask_to_use.shape}, 원본 크기: {original_size[1]}x{original_size[0]}")
             return f"메모리에 ID {memory_id}로 저장되었습니다."
         except Exception as e:
             import traceback

@@ -35,9 +35,7 @@ class MemorySAMUI:
     def __init__(self, 
                 model_type: str = "hiera_l", 
                 checkpoint_path: str = None,
-                dinov2_model: str = "facebook/dinov2-base",
-                dinov2_matching_repo: str = "facebookresearch/dinov2",
-                dinov2_matching_model: str = "dinov2_vitb14",
+                dinov3_model: str = "dinov3_vitb16",
                 memory_dir: str = "memory", 
                 results_dir: str = "results",
                 device: str = "cuda",
@@ -48,9 +46,7 @@ class MemorySAMUI:
         Args:
             model_type: SAM2 model type to use
             checkpoint_path: Path to checkpoint
-            dinov2_model: DINOv2 model name
-            dinov2_matching_repo: DINOv2 repository for sparse matching
-            dinov2_matching_model: DINOv2 model for sparse matching
+            dinov3_model: DINOv3 model name
             memory_dir: Memory directory
             results_dir: Results directory
             device: Device to use
@@ -60,9 +56,7 @@ class MemorySAMUI:
         self.memory_sam = MemorySAMPredictor(
             model_type=model_type,
             checkpoint_path=checkpoint_path,
-            dinov2_model=dinov2_model,
-            dinov2_matching_repo=dinov2_matching_repo,
-            dinov2_matching_model=dinov2_matching_model,
+            dinov3_model=dinov3_model,
             memory_dir=memory_dir,
             results_dir=results_dir,
             device=device,
@@ -161,7 +155,7 @@ class MemorySAMUI:
                     
                     # 클러스터링 하이퍼파라미터 컨트롤
                     with gr.Accordion("클러스터링 하이퍼파라미터", open=False):
-                        similarity_threshold, background_weight, skip_clustering, hybrid_clustering, max_positive_points, max_negative_points = \
+                        similarity_threshold, background_weight, skip_clustering, hybrid_clustering, max_positive_points, max_negative_points, use_positive_kmeans, positive_kmeans_clusters = \
                             UIComponents.create_clustering_controls()
                     
                     with gr.Accordion("참조 이미지 (선택 사항)", open=False):
@@ -252,6 +246,37 @@ class MemorySAMUI:
                 outputs=[]
             )
             
+            # 배경 매칭 상태 동기화
+            def _update_match_background(v):
+                self.match_background = bool(v)
+                if hasattr(self, 'memory_sam'):
+                    self.memory_sam.match_background = bool(v)
+                return
+
+            match_background.change(
+                fn=_update_match_background,
+                inputs=[match_background],
+                outputs=[]
+            )
+
+            # 전경 KMeans 옵션 동기화
+            def _update_positive_kmeans(use_km, n_clusters):
+                setattr(self.memory_sam, 'use_positive_kmeans', bool(use_km))
+                setattr(self.memory_sam, 'positive_kmeans_clusters', int(n_clusters))
+                return
+
+            use_positive_kmeans.change(
+                fn=_update_positive_kmeans,
+                inputs=[use_positive_kmeans, positive_kmeans_clusters],
+                outputs=[]
+            )
+
+            positive_kmeans_clusters.change(
+                fn=_update_positive_kmeans,
+                inputs=[use_positive_kmeans, positive_kmeans_clusters],
+                outputs=[]
+            )
+
             # 하이퍼파라미터 변경 이벤트
             similarity_threshold.change(
                 fn=self.update_similarity_threshold,
@@ -315,7 +340,8 @@ class MemorySAMUI:
                             memory_mask, 
                             self.memory_sam.current_mask,
                             skip_clustering=skip,
-                            hybrid_clustering=hybrid
+                            hybrid_clustering=hybrid,
+                            match_background=self.match_background if hasattr(self, 'match_background') else True
                         )
                         
                         # 저장 경로 생성
@@ -403,7 +429,8 @@ class MemorySAMUI:
                 outputs=[
                     result_image, mask_image, memory_gallery, memory_info,
                     result_gallery, selected_original, selected_mask, selected_overlay, result_info,
-                    sparse_match_vis, img1_points, img2_points
+                    sparse_match_vis, img1_points, img2_points,
+                    processed_images_state
                 ]
             )
             
@@ -429,8 +456,13 @@ class MemorySAMUI:
     
     def handle_resize_change(self, resize_option: str):
         """리사이징 옵션 변경 처리"""
-        self.current_resize_scale = ImageResizer.RESIZE_OPTIONS.get(resize_option, 1.0)
-        print(f"이미지 리사이징 비율이 {resize_option} ({self.current_resize_scale})로 설정되었습니다.")
+        # UI의 문자열 선택을 백엔드가 이해할 수 있는 값으로 변환
+        if resize_option == "512x512 고정":
+            self.current_resize_scale = "512x512"
+        else: # "원본 이미지" 또는 다른 경우
+            self.current_resize_scale = 1.0
+        
+        print(f"이미지 리사이징 옵션 변경: '{resize_option}' -> internal value: {self.current_resize_scale}")
     
     def update_similarity_threshold(self, threshold: float):
         """유사도 임계값 업데이트"""
@@ -771,32 +803,28 @@ class MemorySAMUI:
         # 이미지가 있는지 확인
         if image is None:
             print("이미지가 없습니다. 클릭 이벤트 무시")
-            return points, labels
+            # 출력 형식 유지: (segmentation_result, current_points_state, current_labels_state)
+            return None, points, labels
             
         # 원본 이미지 크기 저장
         original_height, original_width = image.shape[:2]
         print(f"원본 이미지 크기: {original_width}x{original_height}")
         
-        # 이미지 처리를 위해 항상 512x512로 리사이징
-        processed_image = ImageResizer.resize_image(image, "512x512")
-        print(f"처리용 이미지 크기: 512x512")
+        # 원본 크기 그대로 사용
+        processed_image = image
+        print(f"처리용 이미지 크기: {processed_image.shape[1]}x{processed_image.shape[0]}")
         
         # 클릭 시 Gradio 인터페이스가 전달하는 좌표를 분석
         x_click, y_click = evt.index
         
-        # 좌표를 직접 512x512 좌표계로 변환
-        # Gradio 컴포넌트가 표시하는 이미지 크기와 관계없이 
-        # 원본 이미지 대비 512x512 이미지의 비율을 사용하여 변환
-        norm_x = int(x_click * 512 / original_width)
-        norm_y = int(y_click * 512 / original_height)
+        # 원본 좌표계를 그대로 사용
+        norm_x = int(x_click)
+        norm_y = int(y_click)
+        norm_x = max(0, min(norm_x, original_width-1))
+        norm_y = max(0, min(norm_y, original_height-1))
+        print(f"클릭 좌표 변환: 원본 좌표({x_click}, {y_click}) -> 원본 좌표 유지: ({norm_x}, {norm_y})")
         
-        # 좌표가 이미지 영역 내에 있도록 조정
-        norm_x = max(0, min(norm_x, 511))
-        norm_y = max(0, min(norm_y, 511))
-        
-        print(f"클릭 좌표 변환: 원본 좌표({x_click}, {y_click}) -> 512x512 좌표: ({norm_x}, {norm_y})")
-        
-        # 새 포인트 생성 (512x512 좌표계)
+        # 새 포인트 생성 (원본 좌표계)
         norm_point = [norm_x, norm_y]
         norm_label = 1 if self.mask_generator_module.current_point_type == "전경 (객체)" else 0
         
@@ -917,6 +945,28 @@ class MemorySAMUI:
                                 interactive=False,
                                 elem_id="match_info"
                             )
+                            
+                            # 스파스 매칭 시각화 섹션
+                            with gr.Accordion("스파스 매칭 시각화", open=False):
+                                sparse_match_vis = gr.Image(
+                                    label="현재 설정에 따른 스파스 매칭 시각화",
+                                    type="numpy",
+                                    interactive=False
+                                )
+                                
+                                with gr.Row():
+                                    with gr.Column(scale=1):
+                                        img1_points = gr.Image(
+                                            label="메모리 이미지 특징점",
+                                            type="numpy",
+                                            interactive=False
+                                        )
+                                    with gr.Column(scale=1):
+                                        img2_points = gr.Image(
+                                            label="현재 이미지 특징점",
+                                            type="numpy",
+                                            interactive=False
+                                        )
                     
                     with gr.Row():
                         delete_memory_btn = gr.Button("메모리 초기화", variant="stop", elem_id="delete_memory_btn")
@@ -958,27 +1008,43 @@ class MemorySAMUI:
                 # 항목 ID 저장
                 item_id = info.get("id") if info else None
                 
+                # 스파스 매칭 시각화 초기화
+                sparse_vis = None
+                img1_vis = None
+                img2_vis = None
+                
                 if self.memory_sam.current_image is not None and self.memory_sam.use_sparse_matching:
                     try:
                         if item_id is not None and info.get("has_patch_features", False):
-                            match_vis = self.memory_manager_module.visualize_memory_matches(
-                                item_id,
-                                self.memory_sam.current_image
-                            )
-                            match_info_text = f"ID {item_id}와 현재 이미지 간의 특징 매칭 시각화" if match_vis is not None else "특징 매칭을 시각화할 수 없습니다."
+                            # 메모리 항목 데이터 로드
+                            item_data = self.memory_sam.memory.load_item_data(item_id)
+                            
+                            if "patch_features" in item_data:
+                                # 스파스 매칭 시각화 생성
+                                sparse_vis, img1_vis, img2_vis = self.memory_sam.visualize_sparse_matches(
+                                    item_data["image"], 
+                                    self.memory_sam.current_image,
+                                    item_data.get("mask"),
+                                    self.memory_sam.current_mask
+                                )
+                                match_info_text = f"ID {item_id}와 현재 이미지 간의 특징 매칭 시각화"
+                            else:
+                                match_info_text = "이 메모리 항목에는 패치 특징이 없습니다."
                         else:
                             match_info_text = "이 메모리 항목에는 스파스 매칭을 위한 패치 특징이 없습니다."
                     except Exception as e:
                         match_info_text = f"특징 매칭 시각화 오류: {str(e)}"
+                        import traceback
+                        traceback.print_exc()
                 else:
                     match_info_text = "스파스 매칭이 비활성화되었거나 현재 이미지가 없습니다."
                 
-                return image, info, match_vis, match_info_text, item_id
+                return image, info, sparse_vis, match_info_text, item_id, sparse_vis, img1_vis, img2_vis
 
             memory_display.select(
                 fn=handle_memory_select,
                 inputs=[],
-                outputs=[selected_memory_image, selected_memory_info, match_visualization, match_info, selected_item_id]
+                outputs=[selected_memory_image, selected_memory_info, match_visualization, match_info, selected_item_id, sparse_match_vis, img1_points, img2_points]
             )
             
             # 선택 항목 삭제 버튼 이벤트 설정

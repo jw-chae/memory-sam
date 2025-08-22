@@ -10,8 +10,9 @@ from pathlib import Path
 from datetime import datetime
 from sklearn.neighbors import NearestNeighbors
 
-# Import DINOv2 for feature extraction
-from transformers import AutoImageProcessor, AutoModel
+# Import DINOv3 for feature extraction
+# Note: DINOv3 uses torch.hub instead of transformers
+import torch.hub
 
 # SAM2 module import - trying various paths
 possible_paths = [
@@ -51,9 +52,9 @@ except Exception as e:
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from sam2.build_sam import build_sam2
 
-# Import memory system and DINOv2 matcher
+# Import memory system and DINOv3 matcher
 from scripts.memory_system import MemorySystem
-from scripts.dinov2_matcher import Dinov2Matcher
+from scripts.dinov3_matcher import Dinov3Matcher
 
 class MemorySAMPredictor:
     """SAM2 with DINOv2 and a memory system for intelligent segmentation"""
@@ -61,9 +62,9 @@ class MemorySAMPredictor:
     def __init__(self, 
                 model_type: str = "hiera_l", 
                 checkpoint_path: str = None,
-                dinov2_model: str = "facebook/dinov2-base",
-                dinov2_matching_repo: str = "facebookresearch/dinov2",
-                dinov2_matching_model: str = "dinov2_vitb14",
+                dinov3_model: str = "dinov3_vitb16",
+                dinov3_matching_repo: str = "facebookresearch/dinov3",
+                dinov3_matching_model: str = "dinov3_vitb16",
                 memory_dir: str = "memory",
                 results_dir: str = "results",
                 device: str = "cuda",
@@ -74,9 +75,9 @@ class MemorySAMPredictor:
         Args:
             model_type: SAM2 model type to use ("hiera_b+", "hiera_l", "hiera_s", "hiera_t")
             checkpoint_path: Path to SAM2 checkpoint
-            dinov2_model: DINOv2 model name (transformers)
-            dinov2_matching_repo: DINOv2 repository for sparse matching
-            dinov2_matching_model: DINOv2 model for sparse matching
+            dinov3_model: DINOv3 model name (torch.hub)
+            dinov3_matching_repo: DINOv3 repository for sparse matching
+            dinov3_matching_model: DINOv3 model for sparse matching
             memory_dir: Memory system directory
             results_dir: Directory to save results
             device: Device to use ("cuda" or "cpu")
@@ -95,7 +96,23 @@ class MemorySAMPredictor:
         # 최대 포인트 수 설정
         self.max_positive_points = 10  # 최대 전경 포인트 수
         self.max_negative_points = 5   # 최대 배경 포인트 수
+        # 전경 KMeans 중심 선택 옵션
+        self.use_positive_kmeans = False
+        self.positive_kmeans_clusters = 5
         
+        # Set seeds for deterministic behavior
+        try:
+            import random
+            np.random.seed(42)
+            random.seed(42)
+            torch.manual_seed(42)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(42)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+        except Exception as _e:
+            print(f"Seed setup failed: {_e}")
+
         # Set device
         if device == "cuda" and torch.cuda.is_available():
             self.device = torch.device("cuda")
@@ -243,29 +260,60 @@ class MemorySAMPredictor:
                 raise
         self.predictor = SAM2ImagePredictor(self.sam_model)
         
-        # Initialize DINOv2 for global feature extraction (transformers)
+        # Initialize DINOv3 for global feature extraction - 사전 훈련된 가중치 사용
         try:
-            print(f"Loading DINOv2 model: {dinov2_model}")
-            self.image_processor = AutoImageProcessor.from_pretrained(dinov2_model)
-            self.dinov2_model = AutoModel.from_pretrained(dinov2_model).to(self.device)
-            print("DINOv2 model loaded successfully")
+            # Force largest available DINOv3 config from local weights (ViT-L/16)
+            dinov3_model = "dinov3_vitl16"
+            print(f"Loading DINOv3 model: {dinov3_model}")
+            # DINOv3 모듈 직접 import
+            import sys
+            dinov3_path = "/home/joongwon00/dinov3"
+            if dinov3_path not in sys.path:
+                sys.path.append(dinov3_path)
+            
+            from dinov3.models.vision_transformer import DinoVisionTransformer
+            
+            # DINOv3 ViT-L/16 구성으로 모델 생성 (큰 모델)
+            self.dinov3_model = DinoVisionTransformer(
+                img_size=518,
+                patch_size=16,
+                embed_dim=1024,
+                depth=24,
+                num_heads=16,
+                mlp_ratio=4,
+                block_chunks=0
+            )
+            
+            # 사전 훈련된 가중치 로드
+            weights_path = "/home/joongwon00/memory-sam/dinov3_weights/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+            if os.path.exists(weights_path):
+                print(f"Loading pretrained weights from: {weights_path}")
+                state_dict = torch.load(weights_path, map_location="cpu")
+                self.dinov3_model.load_state_dict(state_dict, strict=False)
+                print("Pretrained weights loaded successfully")
+            else:
+                print("Warning: Pretrained weights not found, using random initialization")
+            
+            self.dinov3_model = self.dinov3_model.to(self.device)
+            self.dinov3_model.eval()
+            print("DINOv3 model initialized successfully")
         except Exception as e:
-            print(f"Failed to load DINOv2 model: {e}")
+            print(f"Failed to load DINOv3 model: {e}")
             raise
         
-        # Initialize DINOv2 matcher for sparse matching
+        # Initialize DINOv3 matcher for sparse matching
         self.use_sparse_matching = use_sparse_matching
         if use_sparse_matching:
             try:
-                print(f"Initializing DINOv2 Matcher: {dinov2_matching_repo}/{dinov2_matching_model}")
-                self.dinov2_matcher = Dinov2Matcher(
-                    repo_name=dinov2_matching_repo,
-                    model_name=dinov2_matching_model,
+                print(f"Initializing DINOv3 Matcher: {dinov3_matching_repo}/{dinov3_matching_model}")
+                self.dinov3_matcher = Dinov3Matcher(
+                    repo_name=dinov3_matching_repo,
+                    model_name=dinov3_matching_model,
                     device=device
                 )
-                print("DINOv2 Matcher initialized successfully")
+                print("DINOv3 Matcher initialized successfully")
             except Exception as e:
-                print(f"Failed to initialize DINOv2 Matcher: {e}")
+                print(f"Failed to initialize DINOv3 Matcher: {e}")
                 self.use_sparse_matching = False
                 print("Sparse matching disabled. Using global feature matching only.")
         
@@ -285,9 +333,62 @@ class MemorySAMPredictor:
         self.current_grid_size = None
         self.current_resize_scale = None
     
+    def _resize_image_if_needed(self, image: np.ndarray) -> Tuple[np.ndarray, float]:
+        """
+        필요에 따라 이미지 크기를 조정합니다.
+
+        Args:
+            image: 원본 이미지 (numpy 배열)
+
+        Returns:
+            (조정된 이미지, 실제 적용된 리사이즈 비율) 튜플
+        """
+        if not self.resize_images:
+            return image, 1.0
+
+        # 512x512 정사각형 고정: 종횡비 유지 리사이즈 + 패딩으로 정확히 512x512 만들기
+        if self.resize_scale == "512x512":
+            target_size = 512
+            original_height, original_width = image.shape[:2]
+
+            # 긴 변을 512로 맞추는 비율(레터박스)
+            if max(original_width, original_height) == 0:
+                return np.zeros((target_size, target_size, image.shape[2]), dtype=image.dtype), 0.0
+
+            scale = target_size / max(original_width, original_height)
+            new_width = max(1, int(round(original_width * scale)))
+            new_height = max(1, int(round(original_height * scale)))
+
+            resized = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_AREA)
+
+            # 패딩 계산 (중앙 정렬)
+            pad_w = target_size - new_width
+            pad_h = target_size - new_height
+            left = pad_w // 2
+            right = pad_w - left
+            top = pad_h // 2
+            bottom = pad_h - top
+
+            padded = cv2.copyMakeBorder(resized, top, bottom, left, right, borderType=cv2.BORDER_CONSTANT, value=(0, 0, 0))
+
+            actual_scale = scale
+            print(f"이미지를 512x512(패딩)로 리사이즈: ({original_width}, {original_height}) -> ({new_width}, {new_height}) + pad (L{left},R{right},T{top},B{bottom}), scale: {actual_scale:.4f}")
+            return padded, actual_scale
+
+        # 숫자(float) 비율 기반 리사이즈 처리
+        if isinstance(self.resize_scale, (int, float)) and self.resize_scale < 1.0:
+            new_width = int(image.shape[1] * self.resize_scale)
+            new_height = int(image.shape[0] * self.resize_scale)
+            resized_image = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_AREA)
+            print(f"이미지를 비율({self.resize_scale})에 따라 리사이즈: ({image.shape[1]}, {image.shape[0]}) -> ({new_width}, {new_height})")
+            return resized_image, self.resize_scale
+        
+        # resize_scale이 1.0이거나 인식되지 않는 값이면 원본 반환
+        return image, 1.0
+    
     def extract_features(self, image: np.ndarray) -> np.ndarray:
         """
-        Extract global features from image using DINOv2
+        Extract global features from image using DINOv3
         
         Args:
             image: Input image (numpy array)
@@ -301,21 +402,25 @@ class MemorySAMPredictor:
         else:
             image_pil = image
         
-        # Process image for DINOv2
-        inputs = self.image_processor(images=image_pil, return_tensors="pt").to(self.device)
+        # Process image for DINOv3
+        # DINOv3 expects tensor input, so convert PIL to tensor
+        from torchvision import transforms
         
-        # Extract features
+        transform = transforms.Compose([
+            transforms.Resize((518, 518)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        
+        input_tensor = transform(image_pil).unsqueeze(0).to(self.device)
+        
+        # Extract features using DINOv3
         with torch.no_grad():
-            outputs = self.dinov2_model(**inputs)
+            features = self.dinov3_model.forward_features(input_tensor)
+            # Get CLS token (first token)
+            cls_features = features['x_norm_clstoken'].cpu().numpy()
         
-        # Improved feature extraction: Combine CLS token and mean of patch features
-        cls_features = outputs.last_hidden_state[:, 0].cpu().numpy()  # CLS token features
-        
-        # Mean of all patch features (excluding CLS token)
-        patch_mean = torch.mean(outputs.last_hidden_state[:, 1:], dim=1).cpu().numpy()
-        
-        # Combine CLS token and patch mean (weighted: CLS 70%, patch mean 30%)
-        combined_features = 0.7 * cls_features + 0.3 * patch_mean
+        combined_features = cls_features
         
         # L2 normalization
         norm = np.linalg.norm(combined_features[0])
@@ -330,7 +435,7 @@ class MemorySAMPredictor:
 
     def extract_patch_features(self, image: np.ndarray) -> Tuple[np.ndarray, Tuple[int, int], float]:
         """
-        Extract patch features from image using DINOv2 Matcher
+        Extract patch features from image using DINOv3 Matcher
         
         Args:
             image: Input image (numpy array)
@@ -341,11 +446,11 @@ class MemorySAMPredictor:
         if not self.use_sparse_matching:
             raise ValueError("Sparse matching is disabled")
         
-        # Prepare image for DINOv2 format
-        image_tensor, grid_size, resize_scale = self.dinov2_matcher.prepare_image(image)
+        # Prepare image for DINOv3 format
+        image_tensor, grid_size, resize_scale = self.dinov3_matcher.prepare_image(image)
         
         # Extract patch features
-        patch_features = self.dinov2_matcher.extract_features(image_tensor)
+        patch_features = self.dinov3_matcher.extract_features(image_tensor)
         
         # Normalize patch features (row-wise)
         normalized_patch_features = np.zeros_like(patch_features)
@@ -392,13 +497,30 @@ class MemorySAMPredictor:
         # Mask validation
         if np.sum(mask) == 0:
             print("Warning: Empty mask passed to generate_prompt.")
-            # For empty mask, can return default prompt (e.g., center point) or empty prompt
-            # Here, return empty prompt to let SAM predict on whole image (or handle error)
-            return self._create_default_prompt(mask, prompt_type) # Try default prompt even for empty mask
+            return self._create_default_prompt(mask, prompt_type)
 
-        # Restore to original size (if needed)
+        # --- 마스크 리사이징 로직 강화 ---
+        # `original_size`는 현재 처리할 대상 이미지의 크기 (예: 512x288)
+        # `mask`는 메모리에서 온 마스크 (예: 1920x1080)
         if original_size is not None and mask.shape != original_size:
-            mask_resized = cv2.resize(mask.astype(np.uint8), (original_size[1], original_size[0]), interpolation=cv2.INTER_NEAREST)
+            target_h, target_w = original_size
+            mask_h, mask_w = mask.shape
+
+            # 종횡비를 유지하면서 리사이즈
+            scale = min(target_w / mask_w, target_h / mask_h) if mask_w > 0 and mask_h > 0 else 0
+            new_w, new_h = int(mask_w * scale), int(mask_h * scale)
+            
+            if new_w > 0 and new_h > 0:
+                resized_mask_inter = cv2.resize(mask.astype(np.uint8), (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+            else:
+                resized_mask_inter = np.zeros((new_h, new_w), dtype=np.uint8)
+
+            # 타겟 크기에 맞게 패딩 추가
+            mask_resized = np.zeros(original_size, dtype=np.uint8)
+            pad_x = (target_w - new_w) // 2
+            pad_y = (target_h - new_h) // 2
+            mask_resized[pad_y:pad_y + new_h, pad_x:pad_x + new_w] = resized_mask_inter
+            
         else:
             mask_resized = mask
             
@@ -427,15 +549,56 @@ class MemorySAMPredictor:
                     print(f"Using {max_fg_points} foreground points (with clustering)")
                     
                 if len(foreground_points) > max_fg_points:
-                    # Random sampling of points
-                    indices = np.random.choice(len(foreground_points), max_fg_points, replace=False)
-                    selected_fg_points = foreground_points[indices]
+                    # 결정적 균등간격 샘플링
+                    idx = np.linspace(0, len(foreground_points)-1, num=max_fg_points, dtype=int)
+                    selected_fg_points = foreground_points[idx]
                 else:
                     selected_fg_points = foreground_points
                 
+                # 선택된 전경 포인트를 먼저 추가해 후보 목록 생성
                 for pt in selected_fg_points:
                     points.append([pt[1], pt[0]]) # x, y order
                     labels.append(1) # Foreground
+
+                # 전경 KMeans 중심 선택: 특징 공간 기반 n개로 축소
+                try:
+                    if getattr(self, 'use_positive_kmeans', False) and getattr(self, 'current_patch_features', None) is not None:
+                        # 현재 이미지의 패치 특징과 그리드 사용
+                        grid_h, grid_w = self.current_grid_size
+                        # 선택된 전경 포인트의 패치 인덱스 계산
+                        pts_xy = np.array(points[-len(selected_fg_points):])  # 마지막에 추가된 전경들
+                        # 이미지 좌표 -> 그리드 인덱스
+                        gx = np.clip((pts_xy[:,0] * grid_w / mask_resized.shape[1]).astype(int), 0, grid_w-1)
+                        gy = np.clip((pts_xy[:,1] * grid_h / mask_resized.shape[0]).astype(int), 0, grid_h-1)
+                        feat_idx = gy * grid_w + gx
+                        feat_idx = np.clip(feat_idx, 0, self.current_patch_features.shape[0]-1)
+                        feats = self.current_patch_features[feat_idx]
+                        # KMeans in feature space
+                        from sklearn.cluster import KMeans
+                        n_clusters = int(getattr(self, 'positive_kmeans_clusters', 5))
+                        n_clusters = max(1, min(n_clusters, len(selected_fg_points)))
+                        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+                        labels_k = kmeans.fit_predict(feats)
+                        centers = kmeans.cluster_centers_
+                        keep_indices = []
+                        for k in range(n_clusters):
+                            idxs = np.where(labels_k == k)[0]
+                            if idxs.size == 0:
+                                continue
+                            d = np.linalg.norm(feats[idxs] - centers[k], axis=1)
+                            keep_indices.append(int(idxs[np.argmin(d)]))
+                        # 전경 포인트를 중심 포인트로 재구성
+                        kept_pts = pts_xy[keep_indices]
+                        # 기존에 추가했던 전경 포인트를 제거하고 중심만 다시 추가
+                        # points/labels의 뒤에서 전경 개수만 제거
+                        for _ in range(len(selected_fg_points)):
+                            points.pop()
+                            labels.pop()
+                        for pt in kept_pts:
+                            points.append([int(pt[0]), int(pt[1])])
+                            labels.append(1)
+                except Exception as e:
+                    print(f"Positive feature KMeans selection failed: {e}")
             
             # Process background points similarly
             if len(background_points) > 0:
@@ -449,8 +612,8 @@ class MemorySAMPredictor:
                     print(f"Using {max_bg_points} background points (with clustering)")
                 
                 if len(background_points) > max_bg_points:
-                    indices = np.random.choice(len(background_points), max_bg_points, replace=False)
-                    selected_bg_points = background_points[indices]
+                    idx = np.linspace(0, len(background_points)-1, num=max_bg_points, dtype=int)
+                    selected_bg_points = background_points[idx]
                 else:
                     selected_bg_points = background_points
                 
@@ -461,6 +624,16 @@ class MemorySAMPredictor:
             if not points: # Mask exists but no sampled points (e.g., too small mask)
                 return self._create_default_prompt(mask_resized, prompt_type)
                 
+            # 저장: 마지막 프롬프트 포인트(특히 전경 포인트)를 시각화를 위해 보관
+            try:
+                pts_arr = np.array(points)
+                lbl_arr = np.array(labels)
+                self.last_prompt_points = pts_arr
+                self.last_prompt_labels = lbl_arr
+                self.last_fg_prompt_points = pts_arr[lbl_arr == 1] if len(pts_arr) > 0 else None
+            except Exception as e:
+                print(f"Storing last prompt points failed: {e}")
+            
             return {"points": np.array(points), "labels": np.array(labels)}
         
         else:
@@ -576,7 +749,8 @@ class MemorySAMPredictor:
                      use_sparse_matching: bool = None,
                      match_background: bool = True,
                      skip_clustering: bool = False,
-                     auto_add_to_memory: bool = False) -> Dict:
+                     auto_add_to_memory: bool = False,
+                     save_results: bool = True) -> Dict:
         """
         Process image using Memory SAM system
         
@@ -608,52 +782,74 @@ class MemorySAMPredictor:
         # Load image - handle file or folder path
         image_path = Path(image_path)
         
-        # Image processing results
-        results = {}
-        
         # Process folder or single image
         if image_path.is_dir():
-            # Process folder of images
+            # Process a folder of images
             valid_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif']
-            image_files = [f for f in image_path.glob('*') if f.suffix.lower() in valid_extensions]
+            image_files = sorted([f for f in image_path.glob('*') if f.suffix.lower() in valid_extensions])
             
             if not image_files:
-                raise ValueError(f"No image files in folder {image_path}.")
-            
-            # Store all image paths for later additional processing
+                raise ValueError(f"No valid image files found in the folder {image_path}.")
+
+            # Store all image paths for other modules to potentially use
             self.folder_image_paths = [str(f) for f in image_files]
             self.is_folder_processing = True
+
+            all_results = []
+            for i, file_path in enumerate(image_files):
+                print(f"Processing image {i+1}/{len(image_files)}: {file_path.name}")
+                try:
+                    # Process each image individually
+                    single_result = self.process_image(
+                        image_path=str(file_path),
+                        reference_path=reference_path,
+                        prompt_type=prompt_type,
+                        use_sparse_matching=use_sparse_matching,
+                        match_background=match_background,
+                        skip_clustering=skip_clustering,
+                        auto_add_to_memory=auto_add_to_memory,
+                        save_results=save_results
+                    )
+                    all_results.append(single_result)
+                except Exception as e:
+                    print(f"Failed to process {file_path.name}: {e}")
             
-            # Use first image as representative for processing
-            rep_image_path = str(image_files[0])
-            results = self._process_single_image(
-                rep_image_path, 
-                reference_path, 
-                prompt_type, 
-                use_sparse_matching,
-                match_background
-            )
-            
-            # Set folder processing details in results
-            results["is_folder"] = True
-            results["folder_path"] = str(image_path)
-            results["image_count"] = len(image_files)
-            results["processed_image_path"] = rep_image_path
+            # Return a dictionary indicating folder processing is complete, along with the list of results
+            return {
+                "is_folder": True,
+                "results_list": all_results,
+                "folder_path": str(image_path),
+                "image_count": len(all_results)
+            }
+        
         else:
-            # Process single image
+            # Process a single image
             self.is_folder_processing = False
             self.folder_image_paths = []
             
+            # Load the original image from the provided path
+            image_original = np.array(Image.open(str(image_path)).convert("RGB"))
+            
+            # Resize the image according to UI settings before processing
+            image_processed, actual_resize_scale = self._resize_image_if_needed(image_original)
+
+            # Call the internal processing method for the single image
             results = self._process_single_image(
-                str(image_path), 
+                image_processed,
+                str(image_path),
                 reference_path, 
                 prompt_type, 
                 use_sparse_matching,
-                match_background
+                match_background,
+                save_results=save_results
             )
             
+            # Add additional metadata for the single image result
             results["is_folder"] = False
-        
+            results["original_image"] = image_original
+            results["processed_image_shape"] = image_processed.shape
+            results["actual_resize_scale"] = actual_resize_scale
+
         # Add to memory if requested
         if auto_add_to_memory and "image" in results and "mask" in results and "features" in results:
             memory_id = self.memory.add_memory(
@@ -672,16 +868,19 @@ class MemorySAMPredictor:
         return results
     
     def _process_single_image(self, 
+                           image: np.ndarray,
                            image_path: str, 
                            reference_path: str = None,
                            prompt_type: str = "points",
                            use_sparse_matching: bool = None,
-                           match_background: bool = True) -> Dict:
+                           match_background: bool = True,
+                           save_results: bool = True) -> Dict:
         """
         Process a single image (helper method for process_image)
         
         Args:
-            image_path: Path to single image file
+            image: 처리할 이미지 (이미 리사이즈됨)
+            image_path: 원본 이미지 파일 경로
             reference_path: Reference image path (optional)
             prompt_type: Type of prompt to generate
             use_sparse_matching: Whether to use sparse matching
@@ -690,8 +889,6 @@ class MemorySAMPredictor:
         Returns:
             Dictionary containing processing results
         """
-        # Load image
-        image = np.array(Image.open(image_path).convert("RGB"))
         self.current_image = image
         self.current_image_path = str(image_path)
         
@@ -829,10 +1026,11 @@ class MemorySAMPredictor:
         mask, score = self.segment_with_sam(image, prompt)
         self.current_mask = mask
         
-        # Save results
+        # Save results (optional)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         result_base_path = self.results_dir / f"result_{timestamp}"
-        result_base_path.mkdir(exist_ok=True, parents=True)
+        if save_results:
+            result_base_path.mkdir(exist_ok=True, parents=True)
 
         # Create subfolders by type
         input_folder = result_base_path / "inputs"
@@ -840,25 +1038,40 @@ class MemorySAMPredictor:
         overlay_folder = result_base_path / "overlays"
         segment_folder = result_base_path / "segments"
 
-        input_folder.mkdir(exist_ok=True)
-        mask_folder.mkdir(exist_ok=True)
-        overlay_folder.mkdir(exist_ok=True)
-        segment_folder.mkdir(exist_ok=True)
+        if save_results:
+            input_folder.mkdir(exist_ok=True)
+            mask_folder.mkdir(exist_ok=True)
+            overlay_folder.mkdir(exist_ok=True)
+            segment_folder.mkdir(exist_ok=True)
         
         # Image filename stem
         image_stem = Path(self.current_image_path).stem
 
         # Save original image
-        Image.fromarray(image).save(str(input_folder / f"{image_stem}_input.png"))
+        if save_results:
+            Image.fromarray(image).save(str(input_folder / f"{image_stem}_input.png"))
         
         # Save mask
         mask_img = (mask * 255).astype(np.uint8)
-        Image.fromarray(mask_img).save(str(mask_folder / f"{image_stem}_mask.png"))
-        Image.fromarray(mask_img).save(str(segment_folder / f"{image_stem}_segment.png"))
+        if save_results:
+            Image.fromarray(mask_img).save(str(mask_folder / f"{image_stem}_mask.png"))
+
+        # Save segmented color image (apply mask on original image)
+        if save_results:
+            try:
+                seg_color = image.copy()
+                if seg_color.ndim == 2:
+                    seg_color = cv2.cvtColor(seg_color, cv2.COLOR_GRAY2RGB)
+                seg_color[~mask.astype(bool)] = 0
+                Image.fromarray(seg_color).save(str(segment_folder / f"{image_stem}_segment.png"))
+            except Exception as e:
+                print(f"Error saving segmented color image, fallback to mask: {e}")
+                Image.fromarray(mask_img).save(str(segment_folder / f"{image_stem}_segment.png"))
         
         # Save visualization (overlay)
         vis_img = self.visualize_mask(image, mask)
-        Image.fromarray(vis_img).save(str(overlay_folder / f"{image_stem}_overlay.png"))
+        if save_results:
+            Image.fromarray(vis_img).save(str(overlay_folder / f"{image_stem}_overlay.png"))
         
         # Sparse matching visualization (if similar items exist)
         sparse_match_vis = None
@@ -883,9 +1096,10 @@ class MemorySAMPredictor:
                     
                     # Visualize sparse matches
                     sparse_match_vis, img1_points, img2_points = self.visualize_sparse_matches(
-                        image, memory_image, mask, memory_mask, 
+                        image1=image, image2=memory_image, mask1=mask, mask2=memory_mask, 
                         skip_clustering=self.skip_clustering,
-                        save_path=str(result_base_path / f"sparse_matches_{image_stem}.png")
+                        match_background=match_background,
+                        save_path=str(result_base_path / f"sparse_matches_{image_stem}.png") if save_results else None
                     )
             except Exception as e:
                 print(f"Error visualizing sparse matches: {e}")
@@ -990,7 +1204,8 @@ class MemorySAMPredictor:
                                max_matches: int = 50,
                                save_path: Optional[str] = None,
                                skip_clustering: bool = False,
-                               hybrid_clustering: bool = False) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+                               hybrid_clustering: bool = False,
+                               match_background: bool = True) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Visualize sparse matches between two images
         
@@ -1007,8 +1222,10 @@ class MemorySAMPredictor:
         Returns:
             Tuple of visualized matching image, image1 points, image2 points
         """
+        # image1: 현재 처리중인 이미지(리사이즈됨), image2: 메모리 이미지(원본 크기)
+        
         # Add logging for skip_clustering and hybrid_clustering values
-        print(f"[visualize_sparse_matches] Received skip_clustering: {skip_clustering}, hybrid_clustering: {hybrid_clustering}")
+        print(f"[visualize_sparse_matches] Received skip_clustering: {skip_clustering}, hybrid_clustering: {hybrid_clustering}, match_background: {match_background}")
         
         # Determine effective clustering parameters
         # - If skip_clustering is True, we don't cluster at all
@@ -1025,7 +1242,9 @@ class MemorySAMPredictor:
             print(f"Using hybrid clustering mode (cluster by displacement)")
         
         try:
-            # Save original image sizes
+            # 원본 이미지 크기 저장 (시각화를 위해)
+            # image1은 UI에서 리사이즈된 이미지일 수 있으므로, 원본 크기 정보가 필요함
+            # self.current_image가 UI 리사이즈가 적용된 이미지이므로, 이를 원본으로 간주
             original_shape1 = image1.shape
             original_shape2 = image2.shape
             
@@ -1038,47 +1257,33 @@ class MemorySAMPredictor:
                 print(f"Resizing mask2: {mask2.shape} -> {image2.shape[:2]}")
                 mask2 = cv2.resize(mask2.astype(np.uint8), (image2.shape[1], image2.shape[0]), interpolation=cv2.INTER_NEAREST) > 0
             
-            # Check and adjust image size (save scale info)
-            scale1_x, scale1_y = 1.0, 1.0
-            scale2_x, scale2_y = 1.0, 1.0
-            
-            if image1.shape[0] > 1000 or image1.shape[1] > 1000:
-                scale = min(1000 / image1.shape[0], 1000 / image1.shape[1])
-                new_size = (int(image1.shape[1] * scale), int(image1.shape[0] * scale))
-                # Save scale info (original size / adjusted size)
-                scale1_x = original_shape1[1] / new_size[0]
-                scale1_y = original_shape1[0] / new_size[1]
-                print(f"Resizing image1: {image1.shape[:2]} -> {(new_size[1], new_size[0])}")
-                print(f"Image1 scale info: x={scale1_x:.3f}, y={scale1_y:.3f}")
-                image1 = cv2.resize(image1, new_size)
-                if mask1 is not None:
-                    mask1 = cv2.resize(mask1.astype(np.uint8), new_size, interpolation=cv2.INTER_NEAREST) > 0
-            
-            if image2.shape[0] > 1000 or image2.shape[1] > 1000:
-                scale = min(1000 / image2.shape[0], 1000 / image2.shape[1])
-                new_size = (int(image2.shape[1] * scale), int(image2.shape[0] * scale))
-                # Save scale info (original size / adjusted size)
-                scale2_x = original_shape2[1] / new_size[0]
-                scale2_y = original_shape2[0] / new_size[1]
-                print(f"Resizing image2: {image2.shape[:2]} -> {(new_size[1], new_size[0])}")
-                print(f"Image2 scale info: x={scale2_x:.3f}, y={scale2_y:.3f}")
-                image2 = cv2.resize(image2, new_size)
-                if mask2 is not None:
-                    mask2 = cv2.resize(mask2.astype(np.uint8), new_size, interpolation=cv2.INTER_NEAREST) > 0
-            
-            # Save scale info as global variable (for use in other functions)
-            self.current_scale_image1 = (scale1_x, scale1_y)
-            self.current_scale_image2 = (scale2_x, scale2_y)
-            self.current_original_shape1 = original_shape1[:2]
-            self.current_original_shape2 = original_shape2[:2]
+            # 특징 추출을 위해 DINOv3 Matcher가 요구하는 크기(512px)로 리사이즈
+            # 시각화는 원본 비율의 이미지에 수행
+            image1_for_feature, _, _ = self.dinov3_matcher.prepare_image(image1)
+            image2_for_feature, _, _ = self.dinov3_matcher.prepare_image(image2)
             
             # Grayscale conversion (improves keypoint extraction)
             gray1 = cv2.cvtColor(image1, cv2.COLOR_RGB2GRAY) if len(image1.shape) == 3 else image1
             gray2 = cv2.cvtColor(image2, cv2.COLOR_RGB2GRAY) if len(image2.shape) == 3 else image2
             
-            # Extract patch features
-            patch_features1, grid_size1, resize_scale1 = self.extract_patch_features(image1)
-            patch_features2, grid_size2, resize_scale2 = self.extract_patch_features(image2)
+            # Extract or reuse patch features (reuse current image features to avoid recomputation)
+            reuse1 = hasattr(self, 'current_image') and self.current_image is not None and \
+                     image1.shape == self.current_image.shape and np.array_equal(image1, self.current_image) and \
+                     hasattr(self, 'current_patch_features') and self.current_patch_features is not None
+            if reuse1:
+                patch_features1 = self.current_patch_features
+                grid_size1 = self.current_grid_size
+            else:
+                patch_features1, grid_size1, _ = self.extract_patch_features(image1)
+
+            reuse2 = hasattr(self, 'current_image') and self.current_image is not None and \
+                     image2.shape == self.current_image.shape and np.array_equal(image2, self.current_image) and \
+                     hasattr(self, 'current_patch_features') and self.current_patch_features is not None
+            if reuse2:
+                patch_features2 = self.current_patch_features
+                grid_size2 = self.current_grid_size
+            else:
+                patch_features2, grid_size2, _ = self.extract_patch_features(image2)
             
             # Resize and convert mask
             if mask1 is not None:
@@ -1251,7 +1456,8 @@ class MemorySAMPredictor:
                 fg_coords1, fg_coords2, fg_match_similarities = self._match_features(
                     fg_features1_filtered, fg_features2_filtered,
                     fg_original_indices1, fg_original_indices2,
-                    grid_size1, grid_size2, image1.shape, image2.shape,
+                    grid_size1, grid_size2, 
+                    image1.shape, image2.shape, # 원본(리사이즈된) 이미지 shape 전달
                     similarity_threshold=similarity_threshold_fg,
                     max_matches=current_max_matches_param_fg 
                 )
@@ -1259,11 +1465,11 @@ class MemorySAMPredictor:
                 print("Skipping matching due to no foreground keypoints.")
                 fg_coords1, fg_coords2, fg_match_similarities = [], [], []
             
-            # Match background keypoints (if background area exists) - apply stricter threshold
+            # Match background keypoints (if enabled)
             bg_coords1, bg_coords2, bg_match_similarities = [], [], []
             # bg_limit variable should be defined earlier. Check its definition at top of visualize_sparse_matches function.
             # Definition: bg_limit = min(len(fg_features1_indices) // 2, 30)
-            if len(bg_features1_indices) > 0 and len(bg_features2_indices) > 0 and 'bg_original_indices1' in locals() and 'bg_original_indices2' in locals(): # Check if bg_features1_filtered etc. are ready
+            if match_background and len(bg_features1_indices) > 0 and len(bg_features2_indices) > 0 and 'bg_original_indices1' in locals() and 'bg_original_indices2' in locals(): # Check if bg_features1_filtered etc. are ready
                 # Set max_matches value for _match_features based on skip_clustering (for background)
                 current_max_matches_param_bg = 50000 if use_skip_clustering else bg_limit 
 
@@ -1271,11 +1477,25 @@ class MemorySAMPredictor:
                     bg_features1_filtered, bg_features2_filtered, # These variables might only be defined within above if block, so check
                     bg_original_indices1, 
                     bg_original_indices2,
-                    grid_size1, grid_size2, image1.shape, image2.shape,
+                    grid_size1, grid_size2, 
+                    image1.shape, image2.shape, # 원본(리사이즈된) 이미지 shape 전달
                     similarity_threshold=similarity_threshold_bg,
                     max_matches=current_max_matches_param_bg
                 )
             
+            # 하이브리드 모드: 전경/배경 근접 혼재(KNN 그룹)에 대한 겹침 제거 전처리
+            if match_background and use_hybrid_clustering and len(fg_coords1) > 0 and len(bg_coords1) > 0:
+                try:
+                    (fg_coords1, fg_coords2, fg_match_similarities,
+                     bg_coords1, bg_coords2, bg_match_similarities) = self._remove_fg_bg_overlap_knn_groups(
+                        fg_coords1, fg_coords2, fg_match_similarities,
+                        bg_coords1, bg_coords2, bg_match_similarities,
+                        k_neighbors=4
+                    )
+                    print(f"[visualize_sparse_matches] Hybrid KNN-group overlap filtering applied. FG: {len(fg_coords1)}, BG: {len(bg_coords1)}")
+                except Exception as e:
+                    print(f"[visualize_sparse_matches] Error during hybrid KNN-group overlap filtering: {e}")
+
             # Determine whether to apply clustering
             if not use_skip_clustering:
                 print(f"[visualize_sparse_matches] Applying clustering. Initial foreground matches: {len(fg_coords1)}, background matches: {len(bg_coords1)}")
@@ -1303,22 +1523,31 @@ class MemorySAMPredictor:
                 print(f"[visualize_sparse_matches] Clustering applied. Final foreground matches: {len(fg_coords1)}, background matches: {len(bg_coords1)}")
             else:
                 print(f"[visualize_sparse_matches] Skipping clustering. Using all matches - FG: {len(fg_coords1)}, BG: {len(bg_coords1)}")
-                # When skip_clustering is true, limit matches to prevent too many points
+                # When skip_clustering is true, prevent too many points by similarity and user budgets
+                # 1) Coarse limit by max_matches
                 if len(fg_coords1) > max_matches * 3:
-                    # Sort by similarity and take top matches for foreground
                     indices = np.argsort(fg_match_similarities)[::-1][:max_matches * 3]
                     fg_coords1 = [fg_coords1[i] for i in indices]
                     fg_coords2 = [fg_coords2[i] for i in indices]
                     fg_match_similarities = [fg_match_similarities[i] for i in indices]
-                    print(f"Limited foreground matches to {len(fg_coords1)} (top similarity)")
-                
                 if len(bg_coords1) > max_matches // 2:
-                    # Sort by similarity and take top matches for background
                     indices = np.argsort(bg_match_similarities)[::-1][:max_matches // 2]
                     bg_coords1 = [bg_coords1[i] for i in indices]
                     bg_coords2 = [bg_coords2[i] for i in indices]
                     bg_match_similarities = [bg_match_similarities[i] for i in indices]
-                    print(f"Limited background matches to {len(bg_coords1)} (top similarity)")
+                # 2) Enforce strict budgets from UI (max_positive_points/max_negative_points)
+                fg_budget = int(getattr(self, 'max_positive_points', 50))
+                bg_budget = int(getattr(self, 'max_negative_points', 25))
+                if len(fg_coords1) > fg_budget:
+                    indices = np.argsort(fg_match_similarities)[::-1][:fg_budget]
+                    fg_coords1 = [fg_coords1[i] for i in indices]
+                    fg_coords2 = [fg_coords2[i] for i in indices]
+                    fg_match_similarities = [fg_match_similarities[i] for i in indices]
+                if len(bg_coords1) > bg_budget:
+                    indices = np.argsort(bg_match_similarities)[::-1][:bg_budget]
+                    bg_coords1 = [bg_coords1[i] for i in indices]
+                    bg_coords2 = [bg_coords2[i] for i in indices]
+                    bg_match_similarities = [bg_match_similarities[i] for i in indices]
             
             # Combine foreground and background keypoints
             coords1 = fg_coords1 + bg_coords1
@@ -1334,14 +1563,14 @@ class MemorySAMPredictor:
             
             # Match height of both images
             max_h = max(h1, h2)
-            image1_resized = np.zeros((max_h, w1, 3), dtype=np.uint8)
-            image2_resized = np.zeros((max_h, w2, 3), dtype=np.uint8)
+            image1_resized_vis = np.zeros((max_h, w1, 3), dtype=np.uint8)
+            image2_resized_vis = np.zeros((max_h, w2, 3), dtype=np.uint8)
             
-            image1_resized[:h1, :w1] = image1 if len(image1.shape) == 3 else cv2.cvtColor(image1, cv2.COLOR_GRAY2RGB)
-            image2_resized[:h2, :w2] = image2 if len(image2.shape) == 3 else cv2.cvtColor(image2, cv2.COLOR_GRAY2RGB)
+            image1_resized_vis[:h1, :w1] = image1 if len(image1.shape) == 3 else cv2.cvtColor(image1, cv2.COLOR_GRAY2RGB)
+            image2_resized_vis[:h2, :w2] = image2 if len(image2.shape) == 3 else cv2.cvtColor(image2, cv2.COLOR_GRAY2RGB)
             
             # Combined image
-            vis_img = np.hstack([image1_resized, image2_resized])
+            vis_img = np.hstack([image1_resized_vis, image2_resized_vis])
             
             # Visualize matches
             for i, ((x1, y1), (x2, y2), sim) in enumerate(zip(coords1, coords2, match_similarities)):
@@ -1400,6 +1629,37 @@ class MemorySAMPredictor:
                 if i < 5:  # Display for top 5 only
                     cv2.putText(img2_points, f"{sim:.2f}", (x2+5, y2-5), 
                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+
+            # Highlight KMeans centers over the selected foreground points only (not all points)
+            try:
+                from sklearn.cluster import KMeans
+                if len(fg_coords1) >= 1:
+                    pts1 = np.array(fg_coords1, dtype=np.float32)
+                    pts2 = np.array(fg_coords2, dtype=np.float32) if len(fg_coords2) == len(fg_coords1) else None
+                    k = int(getattr(self, 'positive_kmeans_clusters', 4))
+                    k = max(1, min(k, len(pts1)))
+                    kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+                    labels_k = kmeans.fit_predict(pts1)
+                    centers1 = kmeans.cluster_centers_.astype(int)
+                    # centers2: 각 클러스터의 대응 포인트 평균 위치
+                    if pts2 is not None:
+                        centers2 = []
+                        for c in range(k):
+                            idxs = np.where(labels_k == c)[0]
+                            if idxs.size == 0:
+                                continue
+                            cxy = np.mean(pts2[idxs], axis=0)
+                            centers2.append(cxy.astype(int))
+                    else:
+                        centers2 = []
+                    center_highlight_color = (0, 255, 255)
+                    for (cx1, cy1) in centers1:
+                        cv2.circle(img1_points, (int(cx1), int(cy1)), 9, center_highlight_color, 3)
+                    for (cx2, cy2) in centers2:
+                        cv2.circle(img2_points, (int(cx2), int(cy2)), 9, center_highlight_color, 3)
+                    print(f"KMeans center highlight: {k} centers")
+            except Exception as e:
+                print(f"Center highlight failed: {e}")
             
             # Display background keypoints (reddish)
             for i, ((x1, y1), sim) in enumerate(zip(bg_coords1, bg_match_similarities)):
@@ -1533,11 +1793,13 @@ class MemorySAMPredictor:
             y1, x1 = np.unravel_index(feat1_idx, (grid_size1[0], grid_size1[1]))
             y2, x2 = np.unravel_index(feat2_idx, (grid_size2[0], grid_size2[1]))
             
-            # Convert to original image coordinates
-            img1_x = int(x1 * (image1_shape[1] / grid_size1[1]))
-            img1_y = int(y1 * (image1_shape[0] / grid_size1[0]))
-            img2_x = int(x2 * (image2_shape[1] / grid_size2[1]))
-            img2_y = int(y2 * (image2_shape[0] / grid_size2[0]))
+            # 특징 그리드 좌표 -> 이미지 좌표로 변환
+            # grid_size는 특징 추출 시 사용된 이미지의 그리드 크기
+            # image_shape는 현재 시각화에 사용되는 (리사이즈된) 이미지의 크기
+            img1_x = int((x1 + 0.5) * (image1_shape[1] / grid_size1[1]))
+            img1_y = int((y1 + 0.5) * (image1_shape[0] / grid_size1[0]))
+            img2_x = int((x2 + 0.5) * (image2_shape[1] / grid_size2[1]))
+            img2_y = int((y2 + 0.5) * (image2_shape[0] / grid_size2[0]))
             
             coords1.append((img1_x, img1_y))
             coords2.append((img2_x, img2_y))
@@ -1611,31 +1873,39 @@ class MemorySAMPredictor:
             clustered_coords2 = []
             clustered_similarities = []
             
+            # 전역 포인트 예산 (전경/배경 구분)
+            max_points_limit = int(self.max_positive_points if is_foreground else self.max_negative_points)
+
             for i in range(adjusted_n_clusters):
+                # 예산 소진 시 중단
+                if len(clustered_coords1) >= max_points_limit:
+                    break
                 cluster_indices = np.where(cluster_labels == i)[0]
                 if len(cluster_indices) > 0:
                     # Select keypoint with highest similarity within cluster
                     best_idx_in_cluster = cluster_indices[np.argmax(similarities_array[cluster_indices])]
-                    clustered_coords1.append(coords1[best_idx_in_cluster])
-                    clustered_coords2.append(coords2[best_idx_in_cluster])
-                    clustered_similarities.append(similarities[best_idx_in_cluster])
+                    if len(clustered_coords1) < max_points_limit:
+                        clustered_coords1.append(coords1[best_idx_in_cluster])
+                        clustered_coords2.append(coords2[best_idx_in_cluster])
+                        clustered_similarities.append(similarities[best_idx_in_cluster])
                     
                     # 추가 포인트 선택 로직 - max_positive_points/max_negative_points 제한 고려
                     # 전달받은 is_foreground 파라미터를 사용
-                    max_points_limit = self.max_positive_points if is_foreground else self.max_negative_points
-                    
-                    # 현재 클러스터된 포인트 수가 제한보다 적은 경우에만 추가 포인트 허용
-                    if len(clustered_coords1) < max_points_limit and len(cluster_indices) > 10:
-                        # 추가할 포인트 수 계산 (제한까지만)
-                        points_to_add = min(2, max_points_limit - len(clustered_coords1))
-                        if points_to_add > 0:
-                            sorted_indices = np.argsort(similarities_array[cluster_indices])[::-1]
-                            for idx_pos in range(1, min(len(sorted_indices), points_to_add + 1)):
-                                idx = sorted_indices[idx_pos]
-                                if similarities_array[cluster_indices[idx]] > 0.75:  # Only if similarity is high enough
-                                    clustered_coords1.append(coords1[cluster_indices[idx]])
-                                    clustered_coords2.append(coords2[cluster_indices[idx]])
-                                    clustered_similarities.append(similarities[cluster_indices[idx]])
+                    # 전역 예산(전체 포인트 수 한도) 소진 전까지 현재 클러스터에서 추가 포인트 선별
+                    remaining_budget = max(0, max_points_limit - len(clustered_coords1))
+                    if remaining_budget > 0 and len(cluster_indices) > 1:
+                        sorted_indices = np.argsort(similarities_array[cluster_indices])[::-1]
+                        added = 0
+                        # 0번째는 이미 best로 사용했으므로 1부터 시작
+                        for idx_pos in range(1, len(sorted_indices)):
+                            if added >= remaining_budget:
+                                break
+                            idx = sorted_indices[idx_pos]
+                            if similarities_array[cluster_indices[idx]] > 0.75:
+                                clustered_coords1.append(coords1[cluster_indices[idx]])
+                                clustered_coords2.append(coords2[cluster_indices[idx]])
+                                clustered_similarities.append(similarities[cluster_indices[idx]])
+                                added += 1
             
             print(f"Clustered {'foreground' if is_foreground else 'background'} keypoints into {len(clustered_coords1)}.")
             
@@ -1658,3 +1928,92 @@ class MemorySAMPredictor:
                 similarities = [similarities[i] for i in sorted_indices]
                 print(f"Selected top {len(coords1)} keypoints instead of clustering.")
             return coords1, coords2, similarities
+    
+    
+    def _remove_fg_bg_overlap_knn_groups(self,
+                                         fg_coords1, fg_coords2, fg_similarities,
+                                         bg_coords1, bg_coords2, bg_similarities,
+                                         k_neighbors: int = 4,
+                                         max_remove_ratio: float = 0.6):
+        """
+        전경/배경 포인트를 통합하여 KNN 기반 근접 그룹을 형성하고, 그룹 내에 전경과 배경이 함께 존재하면 그룹 내 포인트를 제거.
+        - image1 공간과 image2 공간 각각에서 처리 후, 제거 인덱스를 합집합으로 결합
+        - k_neighbors는 3~4 권장
+        - 제거 비율이 너무 크면 롤백
+        """
+        try:
+            import numpy as np
+            from sklearn.neighbors import NearestNeighbors
+
+            if len(fg_coords1) == 0 or len(bg_coords1) == 0:
+                return fg_coords1, fg_coords2, fg_similarities, bg_coords1, bg_coords2, bg_similarities
+
+            fg_c1 = np.array(fg_coords1, dtype=np.float32)
+            fg_c2 = np.array(fg_coords2, dtype=np.float32)
+            bg_c1 = np.array(bg_coords1, dtype=np.float32)
+            bg_c2 = np.array(bg_coords2, dtype=np.float32)
+
+            def collect_groups(points: np.ndarray, labels: np.ndarray, k: int):
+                if len(points) == 0:
+                    return []
+                k_eff = min(k, len(points))
+                nn = NearestNeighbors(n_neighbors=k_eff)
+                nn.fit(points)
+                neigh_idx = nn.kneighbors(points, return_distance=False)
+                groups = []
+                for i in range(len(points)):
+                    grp = set(neigh_idx[i].tolist())
+                    grp.add(i)  # 자기 자신 포함
+                    grp_labels = set(labels[list(grp)])
+                    if 0 in grp_labels and 1 in grp_labels:
+                        groups.append(grp)
+                return groups
+
+            # image1 공간
+            combined_c1 = np.vstack([fg_c1, bg_c1])
+            labels_c1 = np.array([1] * len(fg_c1) + [0] * len(bg_c1))
+            groups_c1 = collect_groups(combined_c1, labels_c1, k_neighbors)
+
+            # image2 공간
+            combined_c2 = np.vstack([fg_c2, bg_c2])
+            labels_c2 = np.array([1] * len(fg_c2) + [0] * len(bg_c2))
+            groups_c2 = collect_groups(combined_c2, labels_c2, k_neighbors)
+
+            # 제거 인덱스 합집합
+            remove_indices = set()
+            for g in groups_c1:
+                remove_indices |= g
+            for g in groups_c2:
+                remove_indices |= g
+
+            if not remove_indices:
+                return fg_coords1, fg_coords2, fg_similarities, bg_coords1, bg_coords2, bg_similarities
+
+            # FG/BG로 분리된 로컬 인덱스 계산
+            fg_len = len(fg_coords1)
+            fg_remove_local = sorted([i for i in remove_indices if i < fg_len])
+            bg_remove_local = sorted([i - fg_len for i in remove_indices if i >= fg_len])
+
+            # 안전장치: 제거 비율 제한
+            if len(fg_remove_local) > max_remove_ratio * max(1, fg_len) or \
+               len(bg_remove_local) > max_remove_ratio * max(1, len(bg_coords1)):
+                print("[hybrid_knn_groups] Removal ratio too high, rollback.")
+                return fg_coords1, fg_coords2, fg_similarities, bg_coords1, bg_coords2, bg_similarities
+
+            def filter_by_indices(lst, remove_set):
+                rem = set(remove_set)
+                return [v for i, v in enumerate(lst) if i not in rem]
+
+            fg_coords1_f = filter_by_indices(fg_coords1, fg_remove_local)
+            fg_coords2_f = filter_by_indices(fg_coords2, fg_remove_local)
+            fg_sims_f   = filter_by_indices(fg_similarities, fg_remove_local)
+            bg_coords1_f = filter_by_indices(bg_coords1, bg_remove_local)
+            bg_coords2_f = filter_by_indices(bg_coords2, bg_remove_local)
+            bg_sims_f    = filter_by_indices(bg_similarities, bg_remove_local)
+
+            print(f"[hybrid_knn_groups] Removed FG: {len(fg_remove_local)}, BG: {len(bg_remove_local)} (k={k_neighbors})")
+            return fg_coords1_f, fg_coords2_f, fg_sims_f, bg_coords1_f, bg_coords2_f, bg_sims_f
+        except Exception as e:
+            print(f"[hybrid_knn_groups] Error: {e}")
+            return fg_coords1, fg_coords2, fg_similarities, bg_coords1, bg_coords2, bg_similarities
+
