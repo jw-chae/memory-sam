@@ -8,6 +8,8 @@ from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Union, Any
 from sklearn.neighbors import NearestNeighbors
 import faiss
+from scripts.memory_repository import MemoryRepository
+from scripts.logger import get_logger
 
 class MemorySystem:
     """Memory system to store and retrieve image-mask pairs based on feature similarity"""
@@ -19,22 +21,10 @@ class MemorySystem:
         Args:
             memory_dir (str): Directory to store memory items
         """
-        self.memory_dir = Path(memory_dir)
-        self.memory_dir.mkdir(exist_ok=True, parents=True)
-        
-        # Index file
-        self.index_path = self.memory_dir / "index.json"
-        
-        # Load or initialize index
-        if self.index_path.exists():
-            with open(self.index_path, 'r') as f:
-                self.index = json.load(f)
-        else:
-            self.index = {
-                "items": [],
-                "next_id": 0
-            }
-            self._save_index()
+        self.repo = MemoryRepository(memory_dir)
+        self.memory_dir = self.repo.memory_dir
+        self.index = self.repo.load_index()
+        self.log = get_logger("MemorySystem")
         
         # Initialize FAISS index
         self.faiss_index_path = self.memory_dir / "faiss_index.bin"
@@ -84,8 +74,7 @@ class MemorySystem:
     
     def _save_index(self):
         """Save index to disk"""
-        with open(self.index_path, 'w') as f:
-            json.dump(self.index, f, indent=2)
+        self.repo.save_index(self.index)
     
     def add_memory(self, 
                   image: np.ndarray, 
@@ -113,41 +102,12 @@ class MemorySystem:
         memory_id = self.index["next_id"]
         self.index["next_id"] += 1
         
-        # 항목 디렉토리 생성
-        item_dir = self.memory_dir / f"item_{memory_id}"
-        item_dir.mkdir(exist_ok=True)
-        
-        # 이미지, 마스크, 특징 저장
-        image_path = item_dir / "image.png"
-        mask_path = item_dir / "mask.png"
-        features_path = item_dir / "features.npy"
-        
-        # 이미지 저장
-        image_pil = Image.fromarray(image)
-        image_pil.save(str(image_path))
-        
-        # 마스크 저장
-        if mask.dtype != np.uint8:
-            mask = (mask * 255).astype(np.uint8)
-        mask_pil = Image.fromarray(mask)
-        mask_pil.save(str(mask_path))
-        
-        # 특징 저장
-        np.save(str(features_path), features)
-        
-        # 패치 특징 저장 (있는 경우)
-        patch_features_path = None
-        if patch_features is not None:
-            patch_features_path = item_dir / "patch_features.npy"
-            np.save(str(patch_features_path), patch_features)
-            
-            # 그리드 크기와 크기 조정 비율 저장
-            if grid_size is not None and resize_scale is not None:
-                with open(item_dir / "patch_info.json", 'w') as f:
-                    json.dump({
-                        "grid_size": grid_size,
-                        "resize_scale": resize_scale
-                    }, f)
+        # 항목 디렉토리 생성 및 저장 (Repository 사용)
+        item_dir = self.repo.create_item_dir(memory_id)
+        image_rel = self.repo.save_image(item_dir, image)
+        mask_rel = self.repo.save_mask(item_dir, mask)
+        features_rel = self.repo.save_features(item_dir, features)
+        patch_features_rel = self.repo.save_patch_features(item_dir, patch_features, grid_size, resize_scale)
         
         # 메타데이터 저장 (있는 경우)
         if metadata is not None:
@@ -160,15 +120,15 @@ class MemorySystem:
         # 인덱스 항목 생성
         item = {
             "id": memory_id,
-            "image_path": str(image_path.relative_to(self.memory_dir)),
-            "mask_path": str(mask_path.relative_to(self.memory_dir)),
-            "features_path": str(features_path.relative_to(self.memory_dir)),
+            "image_path": image_rel,
+            "mask_path": mask_rel,
+            "features_path": features_rel,
             "created_at": timestamp
         }
         
         # 패치 특징 경로 추가 (있는 경우)
-        if patch_features_path is not None:
-            item["patch_features_path"] = str(patch_features_path.relative_to(self.memory_dir))
+        if patch_features_rel is not None:
+            item["patch_features_path"] = patch_features_rel
         
         # 메타데이터 추가 (있는 경우)
         if metadata is not None:
