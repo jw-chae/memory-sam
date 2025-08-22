@@ -506,12 +506,21 @@ class MemorySAMUI:
         # 리사이징 설정 적용
         self.memory_sam.resize_images = True
         self.memory_sam.resize_scale = self.current_resize_scale
+        # config 동기화
+        if hasattr(self.memory_sam, 'config'):
+            self.memory_sam.config.resize.enabled = True
+            self.memory_sam.config.resize.scale = self.current_resize_scale
         
         # 클러스터링 하이퍼파라미터 설정
         self.memory_sam.similarity_threshold = self.similarity_threshold
         self.memory_sam.background_weight = self.background_weight
-        self.memory_sam.skip_clustering = skip_clustering  # UI의 값으로 설정
-        self.memory_sam.hybrid_clustering = self.hybrid_clustering  # 내부 값으로 설정
+        self.memory_sam.skip_clustering = skip_clustering
+        self.memory_sam.hybrid_clustering = self.hybrid_clustering
+        if hasattr(self.memory_sam, 'config'):
+            self.memory_sam.config.matching.similarity_threshold = self.similarity_threshold
+            self.memory_sam.config.matching.background_weight = self.background_weight
+            self.memory_sam.config.matching.skip_clustering = skip_clustering
+            self.memory_sam.config.matching.hybrid_clustering = self.hybrid_clustering
         
         # 내부 변수도 업데이트 (클러스터링 설정 동기화)
         self.skip_clustering = skip_clustering

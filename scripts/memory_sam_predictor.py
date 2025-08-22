@@ -57,6 +57,8 @@ from scripts.memory_system import MemorySystem
 from scripts.dinov3_matcher import Dinov3Matcher
 from scripts.image_preprocessor import ImagePreprocessor
 from scripts.matching_engine import MatchingEngine
+from scripts.config import AppConfig
+from scripts.logger import get_logger
 
 class MemorySAMPredictor:
     """SAM2 with DINOv2 and a memory system for intelligent segmentation"""
@@ -338,6 +340,21 @@ class MemorySAMPredictor:
         # Utilities
         self.image_preprocessor = ImagePreprocessor()
         self.matching_engine = MatchingEngine(self)
+
+        # App config and logger
+        self.config = AppConfig()
+        # sync legacy flags with config
+        self.resize_images = self.config.resize.enabled
+        self.resize_scale = self.config.resize.scale
+        self.similarity_threshold = self.config.matching.similarity_threshold
+        self.background_weight = self.config.matching.background_weight
+        self.skip_clustering = self.config.matching.skip_clustering
+        self.hybrid_clustering = self.config.matching.hybrid_clustering
+        self.max_positive_points = self.config.matching.max_positive_points
+        self.max_negative_points = self.config.matching.max_negative_points
+        self.use_positive_kmeans = self.config.matching.use_positive_kmeans
+        self.positive_kmeans_clusters = self.config.matching.positive_kmeans_clusters
+        self.log = get_logger("MemorySAMPredictor")
     
     def _resize_image_if_needed(self, image: np.ndarray) -> Tuple[np.ndarray, float]:
         """
