@@ -55,6 +55,8 @@ from sam2.build_sam import build_sam2
 # Import memory system and DINOv3 matcher
 from scripts.memory_system import MemorySystem
 from scripts.dinov3_matcher import Dinov3Matcher
+from scripts.image_preprocessor import ImagePreprocessor
+from scripts.matching_engine import MatchingEngine
 
 class MemorySAMPredictor:
     """SAM2 with DINOv2 and a memory system for intelligent segmentation"""
@@ -332,6 +334,10 @@ class MemorySAMPredictor:
         self.current_patch_features = None
         self.current_grid_size = None
         self.current_resize_scale = None
+
+        # Utilities
+        self.image_preprocessor = ImagePreprocessor()
+        self.matching_engine = MatchingEngine(self)
     
     def _resize_image_if_needed(self, image: np.ndarray) -> Tuple[np.ndarray, float]:
         """
@@ -343,48 +349,7 @@ class MemorySAMPredictor:
         Returns:
             (조정된 이미지, 실제 적용된 리사이즈 비율) 튜플
         """
-        if not self.resize_images:
-            return image, 1.0
-
-        # 512x512 정사각형 고정: 종횡비 유지 리사이즈 + 패딩으로 정확히 512x512 만들기
-        if self.resize_scale == "512x512":
-            target_size = 512
-            original_height, original_width = image.shape[:2]
-
-            # 긴 변을 512로 맞추는 비율(레터박스)
-            if max(original_width, original_height) == 0:
-                return np.zeros((target_size, target_size, image.shape[2]), dtype=image.dtype), 0.0
-
-            scale = target_size / max(original_width, original_height)
-            new_width = max(1, int(round(original_width * scale)))
-            new_height = max(1, int(round(original_height * scale)))
-
-            resized = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_AREA)
-
-            # 패딩 계산 (중앙 정렬)
-            pad_w = target_size - new_width
-            pad_h = target_size - new_height
-            left = pad_w // 2
-            right = pad_w - left
-            top = pad_h // 2
-            bottom = pad_h - top
-
-            padded = cv2.copyMakeBorder(resized, top, bottom, left, right, borderType=cv2.BORDER_CONSTANT, value=(0, 0, 0))
-
-            actual_scale = scale
-            print(f"이미지를 512x512(패딩)로 리사이즈: ({original_width}, {original_height}) -> ({new_width}, {new_height}) + pad (L{left},R{right},T{top},B{bottom}), scale: {actual_scale:.4f}")
-            return padded, actual_scale
-
-        # 숫자(float) 비율 기반 리사이즈 처리
-        if isinstance(self.resize_scale, (int, float)) and self.resize_scale < 1.0:
-            new_width = int(image.shape[1] * self.resize_scale)
-            new_height = int(image.shape[0] * self.resize_scale)
-            resized_image = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_AREA)
-            print(f"이미지를 비율({self.resize_scale})에 따라 리사이즈: ({image.shape[1]}, {image.shape[0]}) -> ({new_width}, {new_height})")
-            return resized_image, self.resize_scale
-        
-        # resize_scale이 1.0이거나 인식되지 않는 값이면 원본 반환
-        return image, 1.0
+        return self.image_preprocessor.resize_image(image, self.resize_images, self.resize_scale)
     
     def extract_features(self, image: np.ndarray) -> np.ndarray:
         """
