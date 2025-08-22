@@ -2,17 +2,9 @@ import torch
 import torchvision.transforms as transforms
 from PIL import Image
 import numpy as np
-from sklearn.neighbors import NearestNeighbors
 from sklearn.decomposition import PCA
 from typing import Tuple, Optional
-
-# FAISS가 없는 환경에서도 동작하도록 안전한 폴백 추가
-try:
-    import faiss  # type: ignore
-    _FAISS_AVAILABLE = True
-except Exception:
-    faiss = None  # type: ignore
-    _FAISS_AVAILABLE = False
+import faiss
 
 class Dinov3Matcher:
     """DINOv3 기반 이미지 매칭을 위한 클래스"""
@@ -230,27 +222,15 @@ class Dinov3Matcher:
         # 특징 차원 확인
         d = features1.shape[1]
         
-        # 입력 타입/정규화
+        # 입력 타입/정규화 (FAISS 전용)
         features1 = features1.astype(np.float32)
         features2 = features2.astype(np.float32)
 
-        if _FAISS_AVAILABLE:
-            # FAISS 경로 (L2)
-            index = faiss.IndexFlatL2(d)
-            faiss.normalize_L2(features1)
-            index.add(features1)
-            faiss.normalize_L2(features2)
-            distances, matches = index.search(features2, k)
-        else:
-            # 폴백: sklearn NearestNeighbors (cosine 거리를 유사도로 대체)
-            # cosine 거리(작을수록 유사) => 유사도는 1 - 거리
-            nn = NearestNeighbors(n_neighbors=k, metric="cosine")
-            nn.fit(features1)
-            distances_cos, indices = nn.kneighbors(features2, n_neighbors=k, return_distance=True)
-            # FAISS 인터페이스와 동일한 형태로 반환값 정규화
-            matches = indices
-            # cosine 거리 -> L2와 스케일이 다르므로, 여기서는 단순히 거리 배열을 그대로 반환
-            distances = distances_cos
+        index = faiss.IndexFlatL2(d)
+        faiss.normalize_L2(features1)
+        index.add(features1)
+        faiss.normalize_L2(features2)
+        distances, matches = index.search(features2, k)
         
         return distances, matches
     
