@@ -1539,17 +1539,48 @@ class MemorySAMPredictor:
             # Print matching results
             print(f"Foreground matches: {len(fg_coords1)}, background matches: {len(bg_coords1)}, total matches: {len(coords1)}")
             
-            # Place images side-by-side
-            h1, w1 = image1.shape[:2]
-            h2, w2 = image2.shape[:2]
+            # Optional: crop black borders introduced by letterbox padding (for visualization only)
+            def _crop_black_borders(img: np.ndarray):
+                try:
+                    if img.ndim == 3:
+                        nonblack = np.any(img > 0, axis=2)
+                    else:
+                        nonblack = img > 0
+                    rows = np.where(np.any(nonblack, axis=1))[0]
+                    cols = np.where(np.any(nonblack, axis=0))[0]
+                    if rows.size == 0 or cols.size == 0:
+                        return img, (0, 0), img.shape[:2]
+                    top, bottom = int(rows[0]), int(rows[-1] + 1)
+                    left, right = int(cols[0]), int(cols[-1] + 1)
+                    cropped = img[top:bottom, left:right]
+                    return cropped, (left, top), (cropped.shape[0], cropped.shape[1])
+                except Exception:
+                    return img, (0, 0), img.shape[:2]
+
+            img1_vis_src, (off1x, off1y), _ = _crop_black_borders(image1)
+            img2_vis_src, (off2x, off2y), _ = _crop_black_borders(image2)
+
+            # Adjust coordinates to cropped visualization space
+            def _shift_coords(coords, offx, offy):
+                out = []
+                for (x, y) in coords:
+                    out.append((max(0, x - offx), max(0, y - offy)))
+                return out
+
+            coords1 = _shift_coords(coords1, off1x, off1y)
+            coords2 = _shift_coords(coords2, off2x, off2y)
+
+            # Place images side-by-side (with cropped views)
+            h1, w1 = img1_vis_src.shape[:2]
+            h2, w2 = img2_vis_src.shape[:2]
             
             # Match height of both images
             max_h = max(h1, h2)
             image1_resized_vis = np.zeros((max_h, w1, 3), dtype=np.uint8)
             image2_resized_vis = np.zeros((max_h, w2, 3), dtype=np.uint8)
             
-            image1_resized_vis[:h1, :w1] = image1 if len(image1.shape) == 3 else cv2.cvtColor(image1, cv2.COLOR_GRAY2RGB)
-            image2_resized_vis[:h2, :w2] = image2 if len(image2.shape) == 3 else cv2.cvtColor(image2, cv2.COLOR_GRAY2RGB)
+            image1_resized_vis[:h1, :w1] = img1_vis_src if len(img1_vis_src.shape) == 3 else cv2.cvtColor(img1_vis_src, cv2.COLOR_GRAY2RGB)
+            image2_resized_vis[:h2, :w2] = img2_vis_src if len(img2_vis_src.shape) == 3 else cv2.cvtColor(img2_vis_src, cv2.COLOR_GRAY2RGB)
             
             # Combined image
             vis_img = np.hstack([image1_resized_vis, image2_resized_vis])
@@ -1573,21 +1604,32 @@ class MemorySAMPredictor:
                 cv2.line(vis_img, (x1, y1), (x2 + w1, y2), color, 1)
             
             # Visualize keypoints on individual images
-            img1_points = image1.copy() if len(image1.shape) == 3 else cv2.cvtColor(image1, cv2.COLOR_GRAY2RGB)
-            img2_points = image2.copy() if len(image2.shape) == 3 else cv2.cvtColor(image2, cv2.COLOR_GRAY2RGB)
+            img1_points = img1_vis_src.copy() if len(img1_vis_src.shape) == 3 else cv2.cvtColor(img1_vis_src, cv2.COLOR_GRAY2RGB)
+            img2_points = img2_vis_src.copy() if len(img2_vis_src.shape) == 3 else cv2.cvtColor(img2_vis_src, cv2.COLOR_GRAY2RGB)
             
             # Visualize original mask (translucent overlay)
             if mask1 is not None:
                 mask1_overlay = img1_points.copy()
                 mask1_color = np.zeros_like(mask1_overlay)
-                mask1_color[mask1 > 0] = [0, 200, 0]  # Display mask in green
+                # Crop mask1 with same offsets if sizes match original
+                try:
+                    if mask1.shape[:2] == image1.shape[:2]:
+                        mask1 = mask1[off1y:off1y+h1, off1x:off1x+w1]
+                except Exception:
+                    pass
+                mask1_color[mask1 > 0] = [0, 200, 0]
                 # Translucently overlay mask area
                 cv2.addWeighted(mask1_color, 0.3, mask1_overlay, 0.7, 0, img1_points)
                 
             if mask2 is not None:
                 mask2_overlay = img2_points.copy()
                 mask2_color = np.zeros_like(mask2_overlay)
-                mask2_color[mask2 > 0] = [0, 200, 0]  # Display mask in green
+                try:
+                    if mask2.shape[:2] == image2.shape[:2]:
+                        mask2 = mask2[off2y:off2y+h2, off2x:off2x+w2]
+                except Exception:
+                    pass
+                mask2_color[mask2 > 0] = [0, 200, 0]
                 # Translucently overlay mask area
                 cv2.addWeighted(mask2_color, 0.3, mask2_overlay, 0.7, 0, img2_points)
             
@@ -1715,7 +1757,7 @@ class MemorySAMPredictor:
     
     def _match_features(self, features1, features2, original_indices1, original_indices2, 
                       grid_size1, grid_size2, image1_shape, image2_shape, 
-                      similarity_threshold=0.7, max_matches=100):
+                      similarity_threshold=0.7, max_matches=100, ratio_test=0.8, mutual_check=True):
         """
         Helper function to perform matching between two feature sets
         
@@ -1745,15 +1787,34 @@ class MemorySAMPredictor:
         # Calculate cosine similarity
         similarities = np.matmul(features1_norm, features2_norm.T)
         
-        # Find best match for each feature
-        best_matches = []
-        
-        for i in range(len(features1_norm)):
-            best_idx = np.argmax(similarities[i])
-            best_sim = similarities[i][best_idx]
-            
-            if best_sim >= similarity_threshold:
-                best_matches.append((i, best_idx, best_sim))
+        # Find top-2 matches per row for Lowe's ratio test
+        # argsort descending per row
+        top2_idx = np.argpartition(similarities, -2, axis=1)[:, -2:]
+        # sort the two so that first is the best
+        row_indices = np.arange(similarities.shape[0])
+        a, b = top2_idx[:, 0], top2_idx[:, 1]
+        sim_a = similarities[row_indices, a]
+        sim_b = similarities[row_indices, b]
+        # ensure first is max
+        swap_mask = sim_b > sim_a
+        best_idx = np.where(swap_mask, b, a)
+        second_idx = np.where(swap_mask, a, b)
+        best_sim = similarities[row_indices, best_idx]
+        second_sim = similarities[row_indices, second_idx]
+
+        # ratio test: best >= similarity_threshold and best/second >= ratio_test
+        # if second_sim is 0, accept when best_sim >= threshold
+        ratio = np.divide(best_sim, np.maximum(second_sim, 1e-6))
+        pass_mask = (best_sim >= similarity_threshold) & (ratio >= ratio_test)
+
+        # mutual nearest neighbor check (optional)
+        if mutual_check and np.any(pass_mask):
+            # for each column, compute its best row
+            col_best_rows = np.argmax(similarities, axis=0)
+            mutual_mask = col_best_rows[best_idx] == row_indices
+            pass_mask = pass_mask & mutual_mask
+
+        best_matches = [(int(i), int(j), float(best_sim[i])) for i, j in zip(row_indices[pass_mask], best_idx[pass_mask])]
         
         # Sort by similarity
         best_matches.sort(key=lambda x: x[2], reverse=True)
