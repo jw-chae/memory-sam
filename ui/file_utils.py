@@ -16,22 +16,20 @@ class FileManager:
         Returns:
             선택된 디렉토리 경로 (또는 취소 시 빈 문자열)
         """
+        # Gradio 환경에서는 tkinter가 메인 스레드가 아니어서 실패할 수 있으므로
+        # zenity 기반의 브라우저를 우선 시도한다.
         try:
-            import tkinter as tk
-            from tkinter import filedialog
-            
-            # tkinter 초기화 및 숨기기
-            root = tk.Tk()
-            root.withdraw()
-            
-            # 폴더 선택 대화상자 열기
-            folder_path = filedialog.askdirectory(title="폴더 선택")
-            
-            # 취소 시 빈 문자열 반환
-            return folder_path
+            import subprocess
+            result = subprocess.run(['zenity', '--file-selection', '--directory'],
+                                    capture_output=True, text=True)
+            if result.returncode == 0:
+                return result.stdout.strip()
         except Exception as e:
-            print(f"폴더 브라우저 열기 실패: {e}")
-            return ""
+            print(f"zenity 기반 폴더 브라우저 실패: {e}")
+        
+        # 최종 폴백: 입력 실패 시 빈 문자열 반환
+        print("폴더 브라우저 열기 실패: main thread is not in main loop (tkinter 미사용)" )
+        return ""
     
     @staticmethod
     def collect_image_files(folder_path: str) -> List[str]:
