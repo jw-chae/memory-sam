@@ -189,15 +189,35 @@ def browse_directory() -> str:
     """
     try:
         import subprocess
-        result = subprocess.run(['zenity', '--file-selection', '--directory'], 
-                                capture_output=True, text=True)
-        if result.returncode == 0:
-            folder_path = result.stdout.strip()
-            print(f"Selected folder: {folder_path}")
-            return folder_path
+        import shutil
+        
+        # Try zenity first
+        if shutil.which('zenity'):
+            result = subprocess.run(['zenity', '--file-selection', '--directory'], 
+                                    capture_output=True, text=True)
+            if result.returncode == 0:
+                folder_path = result.stdout.strip()
+                print(f"Selected folder: {folder_path}")
+                return folder_path
+        
+        # Try kdialog as alternative
+        elif shutil.which('kdialog'):
+            result = subprocess.run(['kdialog', '--getexistingdirectory'], 
+                                    capture_output=True, text=True)
+            if result.returncode == 0:
+                folder_path = result.stdout.strip()
+                print(f"Selected folder: {folder_path}")
+                return folder_path
+        
+        # If no GUI dialog available, suggest manual input
+        else:
+            print("GUI file browser not available. Please enter folder path manually in the text field.")
+            return ""
+            
         return ""
     except Exception as e:
         print(f"Error browsing for folder: {e}")
+        print("Please enter folder path manually in the text field.")
         return ""
 
 def prepare_input_data(files: Union[List[Any], str, Path], folder_path: str = "") -> Union[str, Any]:

@@ -53,344 +53,931 @@ from sam2.build_sam import build_sam2
 # Import memory system and DINOv2 matcher
 from scripts.memory_system import MemorySystem
 from scripts.dinov3_matcher import Dinov3Matcher
-from scripts.feature_extractor import FeatureExtractor
-from scripts.prompt_generator import PromptGenerator
-from scripts.sparse_matcher import SparseMatcher
-from scripts.visualization import Visualization
-
 
 class MemorySAMPredictor:
-    """Orchestrates the Memory SAM segmentation process using refactored components."""
+    """SAM2 with DINOv2 and a memory system for intelligent segmentation"""
     
     def __init__(self, 
                 model_type: str = "hiera_l", 
                 checkpoint_path: str = None,
+                dinov2_model: str = "facebook/dinov2-base",
+                dinov2_matching_repo: str = "facebookresearch/dinov2",
+                dinov2_matching_model: str = "dinov2_vitb14",
+                # DINOv3 설정 (신규)
+                dinov3_repo: str = "facebookresearch/dinov3",
                 dinov3_model: str = "dinov3_vitl16",
                 memory_dir: str = "memory",
                 results_dir: str = "results",
-                device: str = "cuda"):
+                device: str = "cuda",
+                use_sparse_matching: bool = True):
+        """
+        Initialize Memory SAM predictor
         
-        self.device = self._get_device(device)
-        self.results_dir = Path(results_dir)
-        self.results_dir.mkdir(exist_ok=True, parents=True)
+        Args:
+            model_type: SAM2 model type to use ("hiera_b+", "hiera_l", "hiera_s", "hiera_t")
+            checkpoint_path: Path to SAM2 checkpoint
+            dinov2_model: DINOv2 model name (transformers)
+            dinov2_matching_repo: DINOv2 repository for sparse matching
+            dinov2_matching_model: DINOv2 model for sparse matching
+            memory_dir: Memory system directory
+            results_dir: Directory to save results
+            device: Device to use ("cuda" or "cpu")
+            use_sparse_matching: Whether to use sparse matching
+        """
+        # Resizing options
+        self.resize_images = False
+        self.resize_scale = 1.0
         
-        # UI-configurable settings
+        # Clustering hyperparameters
+        self.similarity_threshold = 0.8
+        self.background_weight = 0.3
+        self.skip_clustering = False
+        self.hybrid_clustering = False  # Hybrid clustering (foreground and background together)
+        
+        # 최대 포인트 수 설정
+        self.max_positive_points = 10  # 최대 전경 포인트 수
+        self.max_negative_points = 5   # 최대 배경 포인트 수
+        # 전경 KMeans 설정 (UI에서 전달)
         self.use_kmeans_fg = True
         self.kmeans_fg_clusters = 10
-        self.skip_clustering = False
+        self.show_only_kmeans_points = True
         
-        # Initialize components
-        self.sam_predictor = self._load_sam_model(model_type, checkpoint_path)
-        self.memory = MemorySystem(memory_dir)
-        self.feature_extractor = FeatureExtractor(dinov3_model, self.device)
-        self.prompt_generator = PromptGenerator()
-        self.sparse_matcher = SparseMatcher()
-        self.visualization = Visualization(self.sparse_matcher)
-
-        # Limit SAM input size to avoid OOM; mask will be upscaled back
-        self.sam_max_side = 1400  # you can adjust via attribute if needed
-
-    def _get_device(self, device_str: str) -> torch.device:
-        final_device = torch.device("cpu")
-        if device_str == "cuda" and torch.cuda.is_available():
+        # Set device
+        if device == "cuda" and torch.cuda.is_available():
+            self.device = torch.device("cuda")
+            # Enable TF32 (Ampere GPU and newer)
             if torch.cuda.get_device_properties(0).major >= 8:
                 torch.backends.cuda.matmul.allow_tf32 = True
                 torch.backends.cudnn.allow_tf32 = True
-            final_device = torch.device("cuda")
+        else:
+            self.device = torch.device("cpu")
         
-        print(f"Using device: {final_device}")
-        return final_device
+        print(f"Using device: {self.device}")
         
-    def _load_sam_model(self, model_type, checkpoint_path):
+        # Find checkpoint path
         if checkpoint_path is None:
+            # Mapping based on model type
             model_name_map = {
                 "hiera_b+": ["base_plus", "b+"],
                 "hiera_l": ["large", "l"],
                 "hiera_s": ["small", "s"],
-                "hiera_t": ["tiny", "t"],
+                "hiera_t": ["tiny", "t"]
             }
+            
+            # List of checkpoint file name patterns
             checkpoint_patterns = [
                 f"sam2_{model_type}.pt",
-                f"sam2.1_{model_type}.pt",
+                f"sam2.1_{model_type}.pt"
             ]
-            if model_type in model_name_map:
+            
+            # Generate additional patterns
+            if model_type in model_name_map: # Check if model_type is a valid key
                 for variant in model_name_map[model_type]:
                     checkpoint_patterns.extend([
                         f"sam2_hiera_{variant}.pt",
-                        f"sam2.1_hiera_{variant}.pt",
+                        f"sam2.1_hiera_{variant}.pt"
                     ])
             
-            checkpoint_dir = '/home/joongwon00/sam2/checkpoints'
-            found_path = None
+            # Checkpoint directory
+            checkpoint_dir = os.path.join('/home/joongwon00/sam2', 'checkpoints')
+            
+            # Find checkpoint file matching pattern
             for pattern in checkpoint_patterns:
                 path = os.path.join(checkpoint_dir, pattern)
                 if os.path.exists(path):
-                    found_path = path
+                    checkpoint_path = path
                     break
             
-            if found_path is None:
-                raise FileNotFoundError(f"SAM Checkpoint not found for model {model_type}. Searched patterns: {checkpoint_patterns}")
-            checkpoint_path = found_path
-
-        print(f"Found SAM Checkpoint at: {checkpoint_path}")
-
-        if not GlobalHydra.instance().is_initialized():
-            initialize_config_module("sam2", version_base="1.2")
+            if checkpoint_path is None:
+                raise FileNotFoundError(f"Checkpoint file not found. Attempted patterns: {checkpoint_patterns}")
         
-        model_type_short = model_type.replace('hiera_', '')
-        config_name = f"configs/sam2.1/sam2.1_hiera_{model_type_short}"
+        print(f"Checkpoint path: {checkpoint_path}")
         
-        try:
-            sam_model = build_sam2(config_name, checkpoint_path, device=self.device)
-            print(f"Successfully loaded SAM model with config: {config_name}")
-        except Exception as e:
-            print(f"Failed to load SAM model with config {config_name}, trying fallback. Error: {e}")
-            config_name = f"configs/sam2/sam2_hiera_{model_type_short}"
+        # SAM2 project root path
+        sam2_root = '/home/joongwon00/sam2'
+        
+        # Possible Hydra config file names
+        possible_config_names = [
+            # SAM2.1 config
+            f"configs/sam2.1/sam2.1_hiera_{model_type.replace('hiera_', '')}",
+            # SAM2 original config
+            f"configs/sam2/sam2_hiera_{model_type.replace('hiera_', '')}",
+            # Absolute path
+            f"/home/joongwon00/sam2/configs/sam2.1/sam2.1_hiera_{model_type.replace('hiera_', '')}.yaml",
+            f"/home/joongwon00/sam2/configs/sam2/sam2_hiera_{model_type.replace('hiera_', '')}.yaml"
+        ]
+        
+        # Try each name
+        config_file = possible_config_names[0]  # Default value
+        
+        print(f"Attempting Hydra config files: {possible_config_names}")
+        
+        # Initialize SAM2
+        all_failed = True
+        for i, cfg in enumerate(possible_config_names):
             try:
-                sam_model = build_sam2(config_name, checkpoint_path, device=self.device)
-                print(f"Successfully loaded SAM model with fallback config: {config_name}")
-            except Exception as e2:
-                print("All attempts to load SAM model failed.")
-                raise e2
-                
-        return SAM2ImagePredictor(sam_model)
-
-    def process_image(self, image_path: str, match_background: bool = True) -> Dict:
-        print("\n" + "="*50)
-        print(f"START: Processing image '{os.path.basename(image_path)}'")
-        print(f"Params: match_background={match_background}, skip_clustering={self.skip_clustering}, kmeans_clusters={self.kmeans_fg_clusters}")
-        print("="*50)
-
-        image = np.array(Image.open(image_path).convert("RGB"))
-        
-        # 1. Feature Extraction
-        print("\n[Step 1] Extracting patch features from input image...")
-        patch_features, grid_size, _ = self.feature_extractor.extract_patch_features(image)
-        print(" -> Done.")
-
-        # 2. Memory Search (Top 5)
-        print("\n[Step 2] Searching for top 5 similar items in memory...")
-        similar_items = self.memory.get_most_similar_sparse(
-            patch_features, grid_size=grid_size, top_k=5, match_background=match_background
-        )
-        if not similar_items:
-            print(" -> No similar items found in memory. Aborting.")
-            return {"error": "No similar items found."}
-        print(f" -> Found {len(similar_items)} similar items.")
-
-        # 3. Prompt Generation from DINO-matched points (centroid on target image)
-        print("\n[Step 3] Generating SAM prompt from DINO-matched points (centroid)...")
-        best_item_data = self.memory.load_item_data(similar_items[0]["item"]["id"])
-        memory_mask = best_item_data.get("mask")
-        memory_patch_features = best_item_data.get("patch_features")
-        memory_grid_size = best_item_data.get("grid_size")
-
-        # Update settings for downstream modules
-        self.prompt_generator.use_kmeans_fg = not self.skip_clustering
-        self.prompt_generator.kmeans_fg_clusters = self.kmeans_fg_clusters
-        self.sparse_matcher.kmeans_fg_clusters = self.kmeans_fg_clusters
-
-        prompt = None
-        try:
-            if memory_patch_features is not None and memory_grid_size is not None:
-                # Prepare coordinates on memory grid (prefer foreground region via mask)
-                mem_h, mem_w = memory_grid_size
-                if memory_mask is not None:
-                    mem_mask_resized = cv2.resize(memory_mask.astype(np.uint8), (mem_w, mem_h), interpolation=cv2.INTER_NEAREST) > 0
-                    mem_y, mem_x = np.where(mem_mask_resized)
-                else:
-                    mem_y, mem_x = np.where(np.ones((mem_h, mem_w), dtype=bool))
-
-                # Prepare coordinates on query grid (use all locations)
-                qry_h, qry_w = grid_size
-                qry_y, qry_x = np.where(np.ones((qry_h, qry_w), dtype=bool))
-
-                # Flatten patch features to rows
-                # Shapes: (C, H, W) -> (H*W, C)
-                mem_flat = memory_patch_features.reshape(memory_patch_features.shape[0], -1).T
-                qry_flat = patch_features.reshape(patch_features.shape[0], -1).T
-
-                # Index by grid coords to align features with coords arrays
-                mem_indices = mem_y * mem_w + mem_x
-                qry_indices = qry_y * qry_w + qry_x
-                mem_feats_sel = mem_flat[mem_indices]
-                qry_feats_sel = qry_flat[qry_indices]
-
-                # Match features and get coordinates on both images
-                match_coords1, match_coords2, match_sims = self._match_features_with_coords(
-                    mem_feats_sel, qry_feats_sel,
-                    (mem_y, mem_x), (qry_y, qry_x),
-                    memory_grid_size, grid_size,
-                    best_item_data["image"].shape, image.shape,
-                    similarity_threshold=0.7, max_matches=200
-                )
-
-                if len(match_coords2) > 0:
-                    # Compute centroid on the target image
-                    xs = np.array([p[0] for p in match_coords2], dtype=np.float32)
-                    ys = np.array([p[1] for p in match_coords2], dtype=np.float32)
-                    cx = float(np.mean(xs))
-                    cy = float(np.mean(ys))
-                    point = np.array([[cx, cy]], dtype=np.float32)
-                    labels = np.array([1], dtype=np.int32)
-                    prompt = {"points": point, "labels": labels}
-                    print(f" -> Generated centroid prompt from {len(match_coords2)} matches at ({cx:.1f}, {cy:.1f}).")
-                else:
-                    print(" -> No reliable matches found. Falling back to mask-based prompt.")
-            else:
-                print(" -> Memory item lacks patch features or grid size. Falling back to mask-based prompt.")
-        except Exception as e:
-            print(f" -> Matching-based prompt generation failed: {e}. Falling back to mask-based prompt.")
-
-        # Fallback: use mask-based KMeans prompt
-        if prompt is None:
-            prompt = self.prompt_generator.generate_prompt(
-                memory_mask if memory_mask is not None else np.zeros(image.shape[:2], dtype=np.uint8), 
-                original_size=image.shape[:2], 
-                match_background=match_background
-            )
-        print(f" -> Generated prompt with {len(prompt['points'])} point(s) ({np.sum(prompt['labels']==1)} FG, {np.sum(prompt['labels']==0)} BG).")
-
-        # 4. SAM Segmentation
-        print("\n[Step 4] Performing segmentation with SAM...")
-        mask, score = self.segment_with_sam(image, prompt)
-        print(f" -> Segmentation complete. Mask score: {score:.4f}")
-
-        # 5. Visualization
-        print("\n[Step 5] Generating visualizations...")
-        print(f"[DEBUG] 배경 매칭 상태: {match_background}")
-        vis_img = self.visualization.visualize_mask(image, mask)
-        
-        # Also generate sparse match visualization
-        memory_image = best_item_data["image"]
-        memory_patch_features = best_item_data.get("patch_features")
-        memory_grid_size = best_item_data.get("grid_size")
-        
-        print(f"[DEBUG] 메모리 패치 특징: {memory_patch_features.shape if memory_patch_features is not None else 'None'}")
-        print(f"[DEBUG] 메모리 그리드 크기: {memory_grid_size}")
-        
-        sparse_match_vis, img1_points, img2_points = (None, None, None)
-        if memory_patch_features is not None and memory_grid_size is not None:
-            print(" -> Generating sparse match visualization...")
-            try:
-                sparse_match_vis, img1_points, img2_points = self.visualization.visualize_sparse_matches(
-                    memory_image, image,
-                    memory_patch_features, patch_features,
-                    memory_grid_size, grid_size,
-                    memory_mask, mask,
-                    match_background=match_background,
-                    use_kmeans=(not self.skip_clustering) # Pass use_kmeans instead
-                )
-                print(f"[DEBUG] 스파스 매칭 시각화 완료: {sparse_match_vis.shape if sparse_match_vis is not None else 'None'}")
-                print(f"[DEBUG] 이미지1 포인트: {img1_points.shape if img1_points is not None else 'None'}")
-                print(f"[DEBUG] 이미지2 포인트: {img2_points.shape if img2_points is not None else 'None'}")
+                print(f"[{i+1}/{len(possible_config_names)}] Trying {cfg}...")
+                self.sam_model = build_sam2(cfg, checkpoint_path, device=self.device)
+                config_file = cfg  # Record successful config
+                print(f"Success: {cfg}")
+                all_failed = False
+                break
             except Exception as e:
-                print(f"[ERROR] 스파스 매칭 시각화 생성 실패: {e}")
-                import traceback
-                traceback.print_exc()
+                print(f"Failed: {cfg} - {e}")
+        
+        if all_failed:
+            print(f"All config file attempts failed: {possible_config_names}")
+            print(f"Could be a Hydra config file issue. Trying alternative methods...")
+            
+            # Find absolute path directly and inform Hydra via environment variable
+            config_paths = [
+                # configs/sam2.1 path in SAM2 directory
+                os.path.join('/home/joongwon00/sam2/configs/sam2.1', f'sam2.1_hiera_{model_type.replace("hiera_", "")}.yaml'),
+                # configs/sam2 path in SAM2 directory
+                os.path.join('/home/joongwon00/sam2/configs/sam2', f'sam2_hiera_{model_type.replace("hiera_", "")}.yaml'),
+                # sam2/configs/sam2.1 path in SAM2 directory
+                os.path.join('/home/joongwon00/sam2/sam2/configs/sam2.1', f'sam2.1_hiera_{model_type.replace("hiera_", "")}.yaml'),
+                # sam2/configs/sam2 path in SAM2 directory
+                os.path.join('/home/joongwon00/sam2/sam2/configs/sam2', f'sam2_hiera_{model_type.replace("hiera_", "")}.yaml')
+            ]
+            
+            # Find existing config file
+            config_path = None
+            for path in config_paths:
+                if os.path.exists(path):
+                    config_path = path
+                    break
+            
+            if config_path is None:
+                raise FileNotFoundError(f"Config file not found. Attempted paths: {config_paths}")
+            
+            print(f"Config file path: {config_path}")
+            
+            # Call build_sam2 with config_path directly (this might not work)
+            # If file already exists, copy it to Hydra's default path
+            try:
+                # 1. Read config file content
+                with open(config_path, 'r') as f:
+                    config_content = f.read()
+                
+                # 2. Create configs/sam2_hiera_l.yaml file (where Hydra expects it)
+                hydra_config_path = os.path.join('/home/joongwon00/sam2/configs', f'sam2_hiera_{model_type}.yaml')
+                os.makedirs(os.path.dirname(hydra_config_path), exist_ok=True)
+                
+                # Copy from the correct source file
+                source_config_path = os.path.join('/home/joongwon00/sam2/configs/sam2.1', f'sam2.1_hiera_{model_type}.yaml')
+                if os.path.exists(source_config_path):
+                    import shutil
+                    shutil.copy2(source_config_path, hydra_config_path)
+                    print(f"Copied config file from {source_config_path} to {hydra_config_path}")
+                else:
+                    # Fallback to writing content
+                    with open(hydra_config_path, 'w') as f:
+                        f.write(config_content)
+                    print(f"Created config file at Hydra default path: {hydra_config_path}")
+                
+                # 3. Try using default Hydra path without specifying config file
+                try:
+                    self.sam_model = build_sam2(f"configs/sam2_hiera_{model_type}", checkpoint_path, device=self.device)
+                    print("Successfully loaded config from Hydra default path")
+                except Exception as e3:
+                    print(f"Failed to load from Hydra default path: {e3}")
+                    # 4. Try specifying direct path
+                    try:
+                        self.sam_model = build_sam2(config_path, checkpoint_path, device=self.device)
+                        print(f"Successfully loaded config from absolute path: {config_path}")
+                    except Exception as e4:
+                        print(f"All attempts failed: {e4}")
+                        print("Contact system administrator or check config file path structure.")
+                        raise e4
+            except Exception as e2:
+                print(f"Config file processing failed: {e2}")
+                print("Contact system administrator or check config file path structure.")
+                raise
+        self.predictor = SAM2ImagePredictor(self.sam_model)
+        
+        # Initialize DINOv3 (global + sparse)
+        try:
+            print(f"Loading DINOv3 matcher/model: {dinov3_repo}/{dinov3_model}")
+            self.dinov3_matcher = Dinov3Matcher(
+                model_name=dinov3_model,
+                device=str(self.device)
+            )
+            print("DINOv3 initialized successfully")
+        except Exception as e:
+            print(f"Failed to initialize DINOv3: {e}")
+            raise
+
+        # Sparse matching 플래그
+        self.use_sparse_matching = use_sparse_matching
+        
+        # Initialize memory system
+        self.memory = MemorySystem(memory_dir)
+        
+        # Create results directory
+        self.results_dir = Path(results_dir)
+        self.results_dir.mkdir(exist_ok=True, parents=True)
+        
+        # State variables
+        self.current_image = None
+        self.current_image_path = None
+        self.current_mask = None
+        self.current_features = None
+        self.current_patch_features = None
+        self.current_grid_size = None
+        self.current_resize_scale = None
+    
+    def extract_features(self, image: np.ndarray) -> np.ndarray:
+        """
+        DINOv3로 전역 특징 추출 (CLS + patch mean, L2 정규화)
+        """
+        # 캐시: 동일 경로 이미지면 재계산 생략
+        try:
+            if self.current_image_path and self.current_image_path == getattr(self, 'last_feat_image_path', None):
+                if getattr(self, 'last_global_features', None) is not None:
+                    return self.last_global_features
+        except Exception:
+            pass
+        features = self.dinov3_matcher.extract_global_features(image)
+        self.last_feat_image_path = self.current_image_path
+        self.last_global_features = features
+        print(f"Extracted DINOv3 global feature shape: {features.shape}, norm: {np.linalg.norm(features):.6f}")
+        return features
+
+    def extract_patch_features(self, image: np.ndarray) -> Tuple[np.ndarray, Tuple[int, int], float]:
+        """
+        Extract patch features from image using DINOv3 Matcher
+        
+        Args:
+            image: Input image (numpy array)
+            
+        Returns:
+            (patch_features, grid_size, resize_scale) tuple
+        """
+        if not self.use_sparse_matching:
+            raise ValueError("Sparse matching is disabled")
+        
+        # 캐시: 동일 경로 이미지면 재계산 생략
+        try:
+            if self.current_image_path and self.current_image_path == getattr(self, 'last_patch_image_path', None):
+                if getattr(self, 'last_patch_features', None) is not None and getattr(self, 'last_grid_size', None) is not None:
+                    return self.last_patch_features, self.last_grid_size, getattr(self, 'last_resize_scale', 1.0)
+        except Exception:
+            pass
+        # Prepare image for DINOv3 format
+        image_tensor, grid_size, resize_scale = self.dinov3_matcher.prepare_image(image)
+        
+        # Extract patch features
+        patch_features = self.dinov3_matcher.extract_features(image_tensor)
+        
+        # Normalize patch features (row-wise)
+        normalized_patch_features = np.zeros_like(patch_features)
+        for i in range(patch_features.shape[0]):
+            norm = np.linalg.norm(patch_features[i])
+            if norm > 0:
+                normalized_patch_features[i] = patch_features[i] / norm
+            else:
+                normalized_patch_features[i] = patch_features[i]
+        
+        # Check feature quality
+        feature_norms = np.linalg.norm(normalized_patch_features, axis=1)
+        mean_norm = np.mean(feature_norms)
+        std_norm = np.std(feature_norms)
+        
+        print(f"Normalized patch feature shape: {normalized_patch_features.shape}")
+        print(f"Patch feature norm statistics - mean: {mean_norm:.6f}, std: {std_norm:.6f}")
+        
+        # 캐시 저장
+        self.last_patch_image_path = self.current_image_path
+        self.last_patch_features = normalized_patch_features
+        self.last_grid_size = grid_size
+        self.last_resize_scale = resize_scale
+        return normalized_patch_features, grid_size, resize_scale
+    
+    def _kmeans_sampling(self, points: np.ndarray, n_clusters: int) -> np.ndarray:
+        """
+        K-means 클러스터링을 사용하여 포인트를 샘플링합니다.
+        
+        Args:
+            points: 포인트 배열 (N, 2)
+            n_clusters: 클러스터 수
+            
+        Returns:
+            선택된 포인트들 (n_clusters, 2)
+        """
+        if len(points) <= n_clusters:
+            return points
+            
+        try:
+            from sklearn.cluster import KMeans
+            
+            # K-means 클러스터링 수행
+            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+            kmeans.fit(points)
+            
+            # 각 클러스터의 중심점에 가장 가까운 실제 포인트 선택
+            selected_points = []
+            for center in kmeans.cluster_centers_:
+                distances = np.sum((points - center) ** 2, axis=1)
+                closest_idx = np.argmin(distances)
+                selected_points.append(points[closest_idx])
+                
+            return np.array(selected_points)
+            
+        except ImportError:
+            print("scikit-learn이 설치되지 않아 랜덤 샘플링을 사용합니다.")
+            # scikit-learn이 없으면 랜덤 샘플링 사용
+            indices = np.random.choice(len(points), n_clusters, replace=False)
+            return points[indices]
+
+    def generate_prompt(self, mask: np.ndarray, 
+                      prompt_type: str = "points", 
+                      original_size: Tuple[int, int] = None,
+                      match_background: bool = True) -> Dict:
+        """
+        Generate prompt from mask (points or box)
+        
+        Args:
+            mask: Input mask (H, W)
+            prompt_type: Prompt type ("points" or "box")
+            original_size: Original image size (H, W) - used if resized
+            match_background: Whether to generate background points
+            
+        Returns:
+            Prompt dictionary (e.g., {"points": ..., "labels": ...} or {"box": ...})
+        """
+        if mask is None:
+            return {}
+
+        # If mask is float type, convert to bool
+        if mask.dtype == np.float32 or mask.dtype == np.float64:
+            mask = mask > 0.5 # Threshold can be adjusted
+            
+        # If mask has values other than 0 or 1, binarize
+        if not ((mask == 0) | (mask == 1)).all():
+            mask = (mask > np.min(mask)).astype(np.uint8) # Or appropriate threshold
+
+        # Mask validation
+        if np.sum(mask) == 0:
+            print("Warning: Empty mask passed to generate_prompt.")
+            # For empty mask, can return default prompt (e.g., center point) or empty prompt
+            # Here, return empty prompt to let SAM predict on whole image (or handle error)
+            return self._create_default_prompt(mask, prompt_type) # Try default prompt even for empty mask
+
+        # Restore to original size (if needed)
+        if original_size is not None and mask.shape != original_size:
+            mask_resized = cv2.resize(mask.astype(np.uint8), (original_size[1], original_size[0]), interpolation=cv2.INTER_NEAREST)
         else:
-            print(" -> Skipping sparse match visualization (memory item lacks patch features).")
-        print(" -> Done.")
+            mask_resized = mask
+            
+        # If mask has values other than 0 or 1, binarize (check again after resizing)
+        if not ((mask_resized == 0) | (mask_resized == 1)).all():
+            mask_resized = (mask_resized > np.min(mask_resized)).astype(np.uint8)
 
+        if prompt_type == "points":
+            # Sample foreground/background points
+            foreground_points = np.argwhere(mask_resized > 0)
+            background_points = np.argwhere(mask_resized == 0)
+            
+            points = []
+            labels = []
+            
+            print(f"[포인트 생성] 배경 매칭 활성화: {match_background}")
+            
+            # 전경/배경 후보 포인트 저장 (시각화를 위해)
+            try:
+                self.last_all_fg_candidates = [[int(p[1]), int(p[0])] for p in foreground_points.tolist()]
+                self.last_all_bg_candidates = [[int(p[1]), int(p[0])] for p in background_points.tolist()]
+            except Exception:
+                self.last_all_fg_candidates = []
+                self.last_all_bg_candidates = []
 
-        # 6. Prepare gallery items for UI
-        print("\n[Step 6] Preparing final results package...")
-        gallery_items = []
-        for item in similar_items:
-            item_id = item["item"]["id"]
-            # Avoid loading full image arrays into memory; fetch only metadata
-            item_meta = self.memory.get_item(item_id)
-            if item_meta and "image_path" in item_meta:
-                image_path_full = str(self.memory.memory_dir / item_meta["image_path"]) 
-                gallery_items.append({
-                    "id": item_id,
-                    "similarity": item["similarity"],
-                    "image_path": image_path_full
-                })
+            # 전경 포인트 처리
+            if len(foreground_points) > 0:
+                # KMeans 클러스터 수는 사용자 지정 상한으로 제한
+                k = max(1, self.kmeans_fg_clusters)
+                
+                if self.use_kmeans_fg:
+                    selected_fg_points = self._kmeans_sampling(foreground_points, k)
+                    print(f"[포인트 생성] K-means로 {k}개 전경 포인트 선택")
+                else:
+                    # KMeans 미사용 시 랜덤 샘플링으로 선택
+                    indices = np.random.choice(len(foreground_points), k, replace=False)
+                    selected_fg_points = foreground_points[indices]
+                    print(f"[포인트 생성] 랜덤으로 {k}개 전경 포인트 선택 (KMeans 미사용)")
+                
+                # 최종 선택 전경 포인트 하이라이트를 위해 저장
+                self.last_fg_prompt_points = []
+                for pt in selected_fg_points:
+                    points.append([pt[1], pt[0]]) # x, y order
+                    labels.append(1) # Foreground
+                    self.last_fg_prompt_points.append([int(pt[1]), int(pt[0])])
+            
+            # 배경 포인트 처리
+            if match_background and len(background_points) > 0:
+                # 배경 포인트는 고정된 수(5개)를 사용
+                num_bg_points = min(5, len(background_points))
+                num_bg_points = max(1, num_bg_points) # 최소 1개는 생성
 
-        return {
-            "image": image, "mask": mask, "score": float(score),
-            "visualization": vis_img, "image_path": image_path,
-            "gallery_items": gallery_items,
-            "sparse_match_visualization": sparse_match_vis,
-            "img1_points": img1_points,
-            "img2_points": img2_points,
-        }
+                # K-means 클러스터링 또는 랜덤 샘플링 사용
+                selected_bg_points = self._kmeans_sampling(background_points, num_bg_points)
+                print(f"[포인트 생성] K-means로 {num_bg_points}개 배경 포인트 선택")
+                
+                # 최종 선택 배경 포인트 하이라이트를 위해 저장
+                self.last_bg_prompt_points = []
+                for pt in selected_bg_points:
+                    points.append([pt[1], pt[0]]) # x, y order
+                    labels.append(0) # Background
+                    self.last_bg_prompt_points.append([int(pt[1]), int(pt[0])])
 
-    def segment_with_sam(self, image: np.ndarray, prompt: Dict) -> Tuple[np.ndarray, float]:
-        # Optionally downscale image to reduce memory consumption during SAM
-        orig_h, orig_w = image.shape[:2]
-        max_side = max(orig_h, orig_w)
-        scale = 1.0
-        proc_image = image
-        points_np = np.array(prompt["points"], dtype=np.float32)
-        labels_np = np.array(prompt["labels"], dtype=np.int32)
-        if max_side > getattr(self, 'sam_max_side', max_side):
-            scale = self.sam_max_side / float(max_side)
-            new_size = (int(round(orig_w * scale)), int(round(orig_h * scale)))
-            proc_image = cv2.resize(image, new_size, interpolation=cv2.INTER_LINEAR)
-            points_np = points_np * scale
-            print(f"[SAM] Downscaled image for SAM: {orig_w}x{orig_h} -> {new_size[0]}x{new_size[1]} (scale={scale:.4f})")
-
-        self.sam_predictor.set_image(proc_image)
+            if not points: # Mask exists but no sampled points (e.g., too small mask)
+                return self._create_default_prompt(mask_resized, prompt_type)
+            
+            print(f"[포인트 생성] 최종 생성된 포인트: 전경 {sum(1 for l in labels if l == 1)}개, 배경 {sum(1 for l in labels if l == 0)}개")
+            prompt = {"points": np.array(points), "labels": np.array(labels)}
+            # 시각화를 위한 표시 설정 기록
+            self.last_show_only_kmeans_points = bool(getattr(self, 'show_only_kmeans_points', False))
+            return prompt
         
-        # Convert to tensors
-        points = torch.as_tensor([points_np], dtype=torch.float, device=self.device)
-        labels = torch.as_tensor([labels_np], dtype=torch.int, device=self.device)
+        else:
+            # If unsupported prompt type, return default or empty prompt
+            print(f"Unsupported prompt type: {prompt_type}. Using default prompt.")
+            return self._create_default_prompt(mask_resized, "points") # Default to points
+
+    def _create_default_prompt(self, mask, prompt_type):
+        """Create default prompt when mask is empty or prompt generation is difficult"""
+        h, w = mask.shape[:2]
+        if prompt_type == "points":
+            # One foreground point in image center
+            center_x, center_y = w // 2, h // 2
+            # Check if point is inside mask (optional)
+            # if mask[center_y, center_x] > 0:
+            #     points = np.array([[center_x, center_y]])
+            #     labels = np.array([1])
+            # else: # If center is background, find another point or just use center
+            points = np.array([[center_x, center_y]])
+            labels = np.array([1]) # Assume foreground by default
+            return {"points": points, "labels": labels}
+        # Removed "box" related default prompt logic
+        # elif prompt_type == "box":
+        #     # Box covering entire image
+        #     return {"box": np.array([0, 0, w, h])}
+        return {} # Empty prompt
+
+    def segment_with_sam(self, 
+                        image: np.ndarray, 
+                        prompt: Dict,
+                        multimask_output: bool = True) -> Tuple[np.ndarray, float]:
+        """
+        Perform image segmentation using SAM model
         
-        masks, scores, _ = self.sam_predictor.predict(
-            point_coords=points, 
-            point_labels=labels, 
-            multimask_output=True
+        Args:
+            image: Input image (H, W, C)
+            prompt: Prompt dictionary (can include points, box, etc.)
+            multimask_output: Whether to output multiple masks
+            
+        Returns:
+            (Optimal mask, highest score) tuple
+        """
+        self.predictor.set_image(image)
+        
+        points = prompt.get("points")
+        labels = prompt.get("labels")
+        # box = prompt.get("box") # Removed box prompt usage
+
+        # if box is not None:
+        #     box_torch = torch.as_tensor(box, dtype=torch.float, device=self.device).unsqueeze(0)
+        # else:
+        #     box_torch = None
+        
+        if points is not None and labels is not None:
+            points_torch = torch.as_tensor(points, dtype=torch.float, device=self.device).unsqueeze(0)
+            labels_torch = torch.as_tensor(labels, dtype=torch.int, device=self.device).unsqueeze(0)
+        else:
+            points_torch = None
+            labels_torch = None
+            
+        # SAM model prediction
+        # Modified to call without box prompt
+        masks, scores, logits = self.predictor.predict(
+            point_coords=points_torch,
+            point_labels=labels_torch,
+            # box=box_torch, # Removed box argument
+            multimask_output=multimask_output
         )
         
-        if masks is None or scores is None or scores.size == 0:
+        if masks is None or scores is None or len(scores) == 0:
+            print("SAM prediction failed: Did not return masks or scores")
+            # Return empty mask and 0 score or raise exception
             return np.zeros(image.shape[:2], dtype=bool), 0.0
             
-        # scores is a numpy array, handle different shapes and convert to tensor
-        scores_for_image = scores[0] if scores.ndim > 1 else scores
-        scores_tensor = torch.from_numpy(np.atleast_1d(scores_for_image)).to(self.device)
+        # If scores is NumPy array, convert to PyTorch tensor
+        if isinstance(scores, np.ndarray):
+            scores_tensor = torch.from_numpy(scores).to(self.device)
+        else:
+            scores_tensor = scores # Already a tensor, use as is
+            
+        # Select best score mask
         best_mask_idx = torch.argmax(scores_tensor)
         
-        # Handle different possible shapes of the masks array based on backup logic
-        if masks.ndim == 4:  # Batch, Num_Masks, H, W
-            best_mask = masks[0, best_mask_idx]
-        elif masks.ndim == 3:  # Num_Masks, H, W
-            best_mask = masks[best_mask_idx]
+        # Handle based on masks type
+        if isinstance(masks, torch.Tensor):
+            # If masks is PyTorch tensor
+            best_mask = masks[0, best_mask_idx].cpu().numpy() 
+        elif isinstance(masks, np.ndarray):
+            # If masks is NumPy array (error point)
+            # Indexing adjustment needed based on return shape of self.predictor.predict
+            # If (num_masks, H, W) shape, masks[best_mask_idx] might be correct
+            # Currently assuming (1, num_masks, H, W) or similar, using masks[0, best_mask_idx]
+            if masks.ndim == 4: # Assume (B, N, H, W) NumPy array (B=1)
+                 best_mask = masks[0, best_mask_idx]
+            elif masks.ndim == 3: # Assume (N, H, W) NumPy array
+                 best_mask = masks[best_mask_idx]
+            else:
+                # Specify error possibility or default handling for unexpected shape
+                print(f"Warning: masks has unexpected shape: {masks.shape}")
+                best_mask = masks[best_mask_idx] # Try by default
         else:
-            print(f"Warning: Unexpected mask shape: {masks.shape}. Attempting to select best mask.")
-            # This case might be risky, but it's a fallback based on old code
-            if masks.ndim == 2 and len(scores_for_image) > 1: # multiple masks returned as a stack of 2D arrays
-                best_mask = masks # This is likely wrong, let's assume it's one mask
-            elif masks.ndim == 2:
-                best_mask = masks
-            else: # 1D or other
-                best_mask = masks[best_mask_idx]
-
+            # Exception handling: Unsupported type
+            raise TypeError(f"Unsupported type for masks: {type(masks)}")
             
         best_score = scores_tensor[best_mask_idx].item()
         
-        # Final safety check for mask dimension
-        if best_mask.ndim != 2:
-            print(f"Error: Final mask has invalid dimension {best_mask.ndim}. Returning empty mask.")
-            return np.zeros(image.shape[:2], dtype=bool), 0.0
+        return best_mask, best_score
+    
+    def process_image(self, 
+                     image_path: str, 
+                     reference_path: str = None,
+                     prompt_type: str = "points",
+                     use_sparse_matching: bool = None,
+                     match_background: bool = True,
+                     skip_clustering: bool = False,
+                     auto_add_to_memory: bool = False) -> Dict:
+        """
+        Process image using Memory SAM system
         
-        # If we downscaled for SAM, upscale mask back to original image size
-        final_mask = best_mask
-        if scale != 1.0:
-            final_mask_np = best_mask.astype(np.uint8)
-            final_mask_np = cv2.resize(final_mask_np, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
-            final_mask = final_mask_np.astype(bool)
-            print(f"[SAM] Upscaled mask back to original size: {orig_w}x{orig_h}")
+        Args:
+            image_path: Input image path (file or folder)
+            reference_path: Reference image path (optional)
+            prompt_type: Type of prompt to generate ('points' or 'box')
+            use_sparse_matching: Whether to use sparse matching (None uses initialization setting)
+            match_background: Whether to match background area
+            skip_clustering: Whether to skip clustering (True shows all matches)
+            auto_add_to_memory: Whether to automatically add to memory after processing
+            
+        Returns:
+            Dictionary containing processing results
+        """
+        # Update internal state with skip_clustering value passed at function call
+        self.skip_clustering = skip_clustering
+        print(f"[process_image] Updated self.skip_clustering to: {self.skip_clustering}")
+        print(f"[process_image] Flags => use_sparse_matching: {use_sparse_matching}, match_background: {match_background}")
+        
+        # Validate prompt_type and set default
+        if prompt_type not in ["points"]:
+            print(f"Warning: Invalid prompt_type '{prompt_type}'. Setting to default 'points'.")
+            prompt_type = "points"
+            
+        # Determine whether to use sparse matching
+        if use_sparse_matching is None:
+            use_sparse_matching = self.use_sparse_matching
+        
+        # Load image - handle file or folder path
+        image_path = Path(image_path)
+        
+        # Image processing results
+        results = {}
+        
+        # Process folder or single image
+        if image_path.is_dir():
+            # Process folder of images
+            valid_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif']
+            image_files = [f for f in image_path.glob('*') if f.suffix.lower() in valid_extensions]
+            
+            if not image_files:
+                raise ValueError(f"No image files in folder {image_path}.")
+            
+            # Store all image paths for later additional processing
+            self.folder_image_paths = [str(f) for f in image_files]
+            self.is_folder_processing = True
+            
+            # Process all images in the folder
+            results_list = []
+            for img_file in image_files:
+                try:
+                    single_result = self._process_single_image(
+                        str(img_file), 
+                        reference_path, 
+                        prompt_type, 
+                        use_sparse_matching,
+                        match_background
+                    )
+                    single_result["image_path"] = str(img_file)
+                    results_list.append(single_result)
+                    print(f"Successfully processed: {img_file.name}")
+                except Exception as e:
+                    print(f"Error processing {img_file.name}: {e}")
+                    continue
+            
+            if not results_list:
+                raise ValueError("No images were successfully processed in the folder.")
+            
+            # Set folder processing details in results
+            results = {
+                "is_folder": True,
+                "folder_path": str(image_path),
+                "image_count": len(image_files),
+                "processed_count": len(results_list),
+                "results_list": results_list
+            }
+        else:
+            # Process single image
+            self.is_folder_processing = False
+            self.folder_image_paths = []
+            
+            results = self._process_single_image(
+                str(image_path), 
+                reference_path, 
+                prompt_type, 
+                use_sparse_matching,
+                match_background
+            )
+            
+            results["is_folder"] = False
+        
+        # Add to memory if requested
+        if auto_add_to_memory and "image" in results and "mask" in results and "features" in results:
+            memory_id = self.memory.add_memory(
+                results["image"], 
+                results["mask"], 
+                results["features"],
+                results.get("patch_features"),
+                results.get("grid_size"),
+                results.get("resize_scale"),
+                {"original_path": str(image_path)}
+            )
+            
+            results["added_to_memory"] = True
+            results["memory_id"] = memory_id
+        
+        return results
+    
+    def _process_single_image(self, 
+                           image_path: str, 
+                           reference_path: str = None,
+                           prompt_type: str = "points",
+                           use_sparse_matching: bool = None,
+                           match_background: bool = True) -> Dict:
+        """
+        Process a single image (helper method for process_image)
+        
+        Args:
+            image_path: Path to single image file
+            reference_path: Reference image path (optional)
+            prompt_type: Type of prompt to generate
+            use_sparse_matching: Whether to use sparse matching
+            match_background: Whether to match background area
+            
+        Returns:
+            Dictionary containing processing results
+        """
+        # Load image
+        image = np.array(Image.open(image_path).convert("RGB"))
+        self.current_image = image
+        self.current_image_path = str(image_path)
+        
+        # Extract global features with DINOv2
+        features = self.extract_features(image)
+        self.current_features = features
+        
+        # Extract patch features if sparse matching is enabled
+        patch_features = None
+        grid_size = None
+        resize_scale = None
+        
+        if use_sparse_matching and self.use_sparse_matching:
+            try:
+                patch_features, grid_size, resize_scale = self.extract_patch_features(image)
+                self.current_patch_features = patch_features
+                self.current_grid_size = grid_size
+                self.current_resize_scale = resize_scale
+                print(f"Patch feature extraction complete: shape {patch_features.shape}, grid size {grid_size}")
+            except Exception as e:
+                print(f"Patch feature extraction failed: {e}")
+                print("Continuing with global features only.")
+                use_sparse_matching = False
+        
+        reference_mask = None
+        
+        # Use reference image if provided
+        if reference_path:
+            print(f"Using reference image: {reference_path}")
+            try:
+                reference_img = np.array(Image.open(reference_path).convert("RGB"))
+                reference_mask_path = Path(reference_path).with_suffix('.png')
+                
+                if reference_mask_path.exists():
+                    reference_mask = np.array(Image.open(reference_mask_path))
+                    print(f"Reference mask loaded: {reference_mask_path}, shape: {reference_mask.shape}, type: {reference_mask.dtype}")
+                    
+                    # Check if mask is grayscale
+                    if reference_mask.ndim == 2:
+                        print("Grayscale mask detected")
+                    elif reference_mask.ndim == 3:
+                        print(f"Color mask detected, channels: {reference_mask.shape[2]}")
+                        # Convert multi-channel to single channel (use first channel)
+                        if reference_mask.shape[2] >= 3:
+                            reference_mask = reference_mask[:, :, 0]
+                            print(f"Converted to first channel, new shape: {reference_mask.shape}")
+                else:
+                    print(f"Warning: Reference mask {reference_mask_path} not found")
+                    reference_mask = None
+            except Exception as e:
+                print(f"Error processing reference image: {e}")
+                reference_mask = None
+        
+        # Find similar images in memory or use reference
+        if reference_mask is not None:
+            # Generate prompt using reference mask
+            prompt = self.generate_prompt(reference_mask, prompt_type, original_size=image.shape[:2], match_background=match_background)
+            similar_items = []
+        else:
+            similar_items = []
+            
+            # Use sparse matching if enabled
+            if use_sparse_matching and patch_features is not None:
+                print(f"Finding similar items using sparse matching... (background matching: {match_background})")
+                print(f"[DEBUG] Calling get_most_similar_sparse with match_background={match_background} (type: {type(match_background)})")
+                # In initial stage, mask doesn't exist yet, so only use reference_mask
+                # Note: match_background parameter controls whether background matching is performed
+                similar_items = self.memory.get_most_similar_sparse(
+                    patch_features, 
+                    mask=reference_mask,  # Only use reference_mask if available
+                    grid_size=grid_size, 
+                    top_k=3,
+                    match_background=match_background
+                )
+                print(f"[DEBUG] get_most_similar_sparse returned {len(similar_items)} items")
+                
+                if similar_items:
+                    print(f"Found {len(similar_items)} items with sparse matching")
+                else:
+                    print("No items found with sparse matching. Falling back to global features.")
+            
+            # Use global features if sparse matching fails or is disabled
+            if not similar_items:
+                print("Finding similar items using global features...")
+                similar_items = self.memory.get_most_similar(features, top_k=3, method="global")
+            
+            if similar_items:
+                try:
+                    # Get most matching memory item
+                    best_item = similar_items[0]["item"]
+                    item_data = self.memory.load_item_data(best_item["id"])
+                    
+                    # Add logging for skip_clustering value and selected best_item ID
+                    print(f"[process_image] skip_clustering: {self.skip_clustering}, selected best_item ID: {best_item['id']}")
+                    
+                    print(f"Memory mask loaded: ID {best_item['id']}")
+                    if "mask" in item_data:
+                        mask_data = item_data["mask"]
+                        print(f"Memory mask shape: {mask_data.shape}, type: {mask_data.dtype}")
+                        
+                        # Process multi-channel mask
+                        if mask_data.ndim > 2:
+                            print(f"Multi-channel memory mask detected. Shape: {mask_data.shape}")
+                            # Convert RGB or RGBA mask to single channel
+                            if mask_data.shape[2] >= 3:
+                                # Check if all channels are identical
+                                if np.array_equal(mask_data[:,:,0], mask_data[:,:,1]) and np.array_equal(mask_data[:,:,1], mask_data[:,:,2]):
+                                    # If identical, use first channel
+                                    mask_data = mask_data[:,:,0]
+                                else:
+                                    # Convert to grayscale
+                                    mask_data = cv2.cvtColor(mask_data, cv2.COLOR_RGB2GRAY)
+                            else:
+                                # Single channel 3D mask
+                                mask_data = mask_data[:,:,0]
+                        
+                        # Normalize mask
+                        if mask_data.dtype != np.bool_:
+                            # Convert to binary mask (0 or 1)
+                            mask_data = (mask_data > 0).astype(np.uint8)
+                        
+                        print(f"Processed memory mask shape: {mask_data.shape}, type: {mask_data.dtype}, pixel sum: {np.sum(mask_data)}")
+                        
+                        # Always generate prompt based on the size of the currently processing (representative) image
+                        prompt = self.generate_prompt(mask_data, prompt_type, original_size=image.shape[:2], match_background=match_background)
+                    else:
+                        print("Mask not found in memory item. Using default prompt")
+                        raise KeyError("mask")
+                except Exception as e:
+                    print(f"Error processing memory mask: {e}")
+                    # Use default prompt on error
+                    prompt = self._create_default_prompt(image, prompt_type)
+            else:
+                # No memory items found, use default prompt
+                prompt = self._create_default_prompt(image, prompt_type)
+        
+        # Segment with SAM2
+        mask, score = self.segment_with_sam(image, prompt)
+        self.current_mask = mask
+        
+        # Prepare best_memory_item for return
+        best_memory_item = None
+        if similar_items:
+            try:
+                best_item_id = similar_items[0]["item"]["id"]
+                best_memory_item = self.memory.load_item_data(best_item_id)
+            except (KeyError, IndexError, TypeError) as e:
+                print(f"Could not retrieve best memory item: {e}")
 
-        # Attempt to free intermediate CUDA memory (if using GPU)
-        try:
-            if self.device.type == 'cuda':
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
+        # Save results
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        result_base_path = self.results_dir / f"result_{timestamp}"
+        result_base_path.mkdir(exist_ok=True, parents=True)
 
-        return final_mask, best_score
+        # Create subfolders by type
+        input_folder = result_base_path / "inputs"
+        mask_folder = result_base_path / "masks"
+        overlay_folder = result_base_path / "overlays"
+        segment_folder = result_base_path / "segments"
+
+        input_folder.mkdir(exist_ok=True)
+        mask_folder.mkdir(exist_ok=True)
+        overlay_folder.mkdir(exist_ok=True)
+        segment_folder.mkdir(exist_ok=True)
+        
+        # Image filename stem
+        image_stem = Path(self.current_image_path).stem
+
+        # Save original image
+        Image.fromarray(image).save(str(input_folder / f"{image_stem}_input.png"))
+        
+        # Save mask
+        mask_img = (mask * 255).astype(np.uint8)
+        Image.fromarray(mask_img).save(str(mask_folder / f"{image_stem}_mask.png"))
+        Image.fromarray(mask_img).save(str(segment_folder / f"{image_stem}_segment.png"))
+        
+        # Save visualization (overlay)
+        vis_img = self.visualize_mask(image, mask)
+        Image.fromarray(vis_img).save(str(overlay_folder / f"{image_stem}_overlay.png"))
+        
+        # Sparse matching visualization (if similar items exist)
+        sparse_match_vis = None
+        img1_points = None
+        img2_points = None
+        
+        if use_sparse_matching and self.use_sparse_matching and similar_items and patch_features is not None:
+            try:
+                best_item = similar_items[0]["item"]
+                item_data = self.memory.load_item_data(best_item["id"])
+                
+                if "image" in item_data and "mask" in item_data:
+                    memory_image = item_data["image"]
+                    memory_mask = item_data["mask"]
+                    
+                    # Preprocess memory mask
+                    if memory_mask.ndim > 2:
+                        print(f"Preprocessing multi-channel memory mask. Shape: {memory_mask.shape}")
+                        # Convert RGB or RGBA mask to single channel
+                        if memory_mask.shape[2] >= 3:
+                            memory_mask = memory_mask[:,:,0]
+                    
+                    # Visualize sparse matches
+                    sparse_match_vis, img1_points, img2_points = self.visualize_sparse_matches(
+                        image, memory_image, mask, memory_mask, 
+                        skip_clustering=self.skip_clustering,
+                        save_path=str(result_base_path / f"sparse_matches_{image_stem}.png")
+                    )
+            except Exception as e:
+                print(f"Error visualizing sparse matches: {e}")
+        
+        # Prepare results dictionary
+        results = {
+            "image": image,
+            "mask": mask,
+            "score": float(score),
+            "features": features,
+            "image_path": self.current_image_path,
+            "result_path": str(result_base_path),
+            "visualization": vis_img,
+            "timestamp": timestamp,
+            "similar_items": similar_items,
+            "best_memory_item": best_memory_item,
+        }
+        
+        if patch_features is not None:
+            results["patch_features"] = patch_features
+            results["grid_size"] = grid_size
+            results["resize_scale"] = resize_scale
+        
+        if sparse_match_vis is not None:
+            results["sparse_match_visualization"] = sparse_match_vis
+            results["img1_points"] = img1_points
+            results["img2_points"] = img2_points
+        
+        return results
     
     def visualize_mask(self, image: np.ndarray, mask: np.ndarray, alpha: float = 0.5) -> np.ndarray:
         """
@@ -489,16 +1076,10 @@ class MemorySAMPredictor:
         Returns:
             Tuple of visualized matching image, image1 points, image2 points
         """
-        print(f"[DEBUG] visualize_sparse_matches 시작 - 이미지1: {image1.shape}, 이미지2: {image2.shape}")
-        print(f"[DEBUG] 마스크1: {mask1.shape if mask1 is not None else 'None'}, 마스크2: {mask2.shape if mask2 is not None else 'None'}")
-        print(f"[DEBUG] 매개변수: max_matches={max_matches}, skip_clustering={skip_clustering}, hybrid_clustering={hybrid_clustering}, match_background={match_background}")
-        
         # Ensure masks are single-channel before processing
         if mask1 is not None and mask1.ndim == 3:
-            print(f"[DEBUG] 마스크1을 그레이스케일로 변환: {mask1.shape}")
             mask1 = cv2.cvtColor(mask1, cv2.COLOR_RGB2GRAY)
         if mask2 is not None and mask2.ndim == 3:
-            print(f"[DEBUG] 마스크2를 그레이스케일로 변환: {mask2.shape}")
             mask2 = cv2.cvtColor(mask2, cv2.COLOR_RGB2GRAY)
 
         # Add logging for skip_clustering and hybrid_clustering values
@@ -571,13 +1152,8 @@ class MemorySAMPredictor:
             gray2 = cv2.cvtColor(image2, cv2.COLOR_RGB2GRAY) if len(image2.shape) == 3 else image2
             
             # Extract patch features
-            print(f"[DEBUG] 이미지1에서 패치 특징 추출 시작...")
-            patch_features1, grid_size1, resize_scale1 = self.feature_extractor.extract_patch_features(image1)
-            print(f"[DEBUG] 이미지1 특징 추출 완료: {patch_features1.shape}, 그리드 크기: {grid_size1}")
-            
-            print(f"[DEBUG] 이미지2에서 패치 특징 추출 시작...")
-            patch_features2, grid_size2, resize_scale2 = self.feature_extractor.extract_patch_features(image2)
-            print(f"[DEBUG] 이미지2 특징 추출 완료: {patch_features2.shape}, 그리드 크기: {grid_size2}")
+            patch_features1, grid_size1, resize_scale1 = self.extract_patch_features(image1)
+            patch_features2, grid_size2, resize_scale2 = self.extract_patch_features(image2)
             
             # Resize and convert mask
             if mask1 is not None:
@@ -693,7 +1269,6 @@ class MemorySAMPredictor:
             bg_limit = min(len(fg_coords1[0]) // 2, 30)  # Half of foreground or max 30
             
             if len(bg_coords1[0]) > 0 and len(bg_coords2[0]) > 0:
-                print(f"[DEBUG] 배경 좌표 필터링 시작 - 원본 배경 좌표: {len(bg_coords1[0])}, {len(bg_coords2[0])}")
                 
                 # Evaluate background keypoint quality (variance-based)
                 bg_features1_variance = np.var(bg_features1_masked, axis=1)
@@ -702,7 +1277,6 @@ class MemorySAMPredictor:
                 # Select top background keypoints with high variance (limited number)
                 bg_top_k1 = min(len(bg_features1_variance), bg_limit)
                 bg_top_k2 = min(len(bg_features2_variance), bg_limit)
-                print(f"[DEBUG] 배경 특징 필터링: {bg_top_k1}, {bg_top_k2}개 선택 (제한: {bg_limit})")
                 
                 bg_top_indices1 = np.argsort(bg_features1_variance)[-bg_top_k1:]
                 bg_top_indices2 = np.argsort(bg_features2_variance)[-bg_top_k2:]
@@ -713,9 +1287,6 @@ class MemorySAMPredictor:
                 # Maintain original coordinate mapping
                 bg_coords1_filtered = (bg_coords1[0][bg_top_indices1], bg_coords1[1][bg_top_indices1])
                 bg_coords2_filtered = (bg_coords2[0][bg_top_indices2], bg_coords2[1][bg_top_indices2])
-                print(f"[DEBUG] 배경 좌표 필터링 완료: {len(bg_coords1_filtered[0])}, {len(bg_coords2_filtered[0])}개")
-            else:
-                print(f"[DEBUG] 배경 좌표가 없어서 필터링 건너뜀")
             
             # Evaluate foreground keypoint quality (variance-based) - select more foreground keypoints
             if len(fg_features1_masked) > 0 and len(fg_features2_masked) > 0:
@@ -741,7 +1312,7 @@ class MemorySAMPredictor:
                 current_max_matches_param_fg = 100000 if use_skip_clustering else 100
 
                 # Match foreground keypoints
-                fg_match_coords1, fg_match_coords2, fg_match_similarities = self.sparse_matcher.match_features_with_coords(
+                fg_match_coords1, fg_match_coords2, fg_match_similarities = self._match_features_with_coords(
                     fg_features1_filtered, fg_features2_filtered,
                     fg_coords1_filtered, fg_coords2_filtered,
                     grid_size1, grid_size2, image1.shape, image2.shape,
@@ -754,29 +1325,17 @@ class MemorySAMPredictor:
             
             # Match background keypoints (if background area exists) - apply stricter threshold
             bg_match_coords1, bg_match_coords2, bg_match_similarities = [], [], []
-            print(f"[DEBUG] 배경 매칭 조건 확인:")
-            print(f"[DEBUG] - match_background: {match_background}")
-            print(f"[DEBUG] - bg_coords1 길이: {len(bg_coords1[0]) if len(bg_coords1) > 0 else 0}")
-            print(f"[DEBUG] - bg_coords2 길이: {len(bg_coords2[0]) if len(bg_coords2) > 0 else 0}")
-            print(f"[DEBUG] - bg_coords1_filtered 존재: {'bg_coords1_filtered' in locals()}")
-            print(f"[DEBUG] - bg_coords2_filtered 존재: {'bg_coords2_filtered' in locals()}")
-            
             if match_background and len(bg_coords1[0]) > 0 and len(bg_coords2[0]) > 0 and 'bg_coords1_filtered' in locals() and 'bg_coords2_filtered' in locals():
-                print(f"[DEBUG] 배경 매칭 시작 - 필터링된 배경 특징: {bg_features1_filtered.shape}, {bg_features2_filtered.shape}")
                 # Set max_matches value for _match_features based on skip_clustering (for background)
                 current_max_matches_param_bg = 50000 if use_skip_clustering else bg_limit 
-                print(f"[DEBUG] 배경 매칭 max_matches: {current_max_matches_param_bg}")
 
-                bg_match_coords1, bg_match_coords2, bg_match_similarities = self.sparse_matcher.match_features_with_coords(
+                bg_match_coords1, bg_match_coords2, bg_match_similarities = self._match_features_with_coords(
                     bg_features1_filtered, bg_features2_filtered,
                     bg_coords1_filtered, bg_coords2_filtered,
                     grid_size1, grid_size2, image1.shape, image2.shape,
                     similarity_threshold=similarity_threshold_bg,
                     max_matches=current_max_matches_param_bg
                 )
-                print(f"[DEBUG] 배경 매칭 완료: {len(bg_match_coords1)}개 매칭")
-            else:
-                print(f"[DEBUG] 배경 매칭 건너뜀 - 조건 불충족")
             
             # Determine whether to apply clustering
             if not use_skip_clustering:
@@ -790,13 +1349,13 @@ class MemorySAMPredictor:
                 
                 # Cluster foreground and background keypoints
                 if len(fg_match_coords1) > 0:
-                    fg_match_coords1, fg_match_coords2, fg_match_similarities = self.sparse_matcher.cluster_feature_points(
+                    fg_match_coords1, fg_match_coords2, fg_match_similarities = self._cluster_feature_points(
                         fg_match_coords1, fg_match_coords2, fg_match_similarities, 
                         n_clusters=self.kmeans_fg_clusters, is_foreground=True
                     )
                 
                 if match_background and len(bg_match_coords1) > 0:
-                    bg_match_coords1, bg_match_coords2, bg_match_similarities = self.sparse_matcher.cluster_feature_points(
+                    bg_match_coords1, bg_match_coords2, bg_match_similarities = self._cluster_feature_points(
                         bg_match_coords1, bg_match_coords2, bg_match_similarities, 
                         n_clusters=5, is_foreground=False # Use a fixed number for background
                     )
@@ -834,8 +1393,8 @@ class MemorySAMPredictor:
                 coords1, coords2, match_similarities = fg_match_coords1, fg_match_coords2, fg_match_similarities
                 point_types = ['foreground'] * len(fg_match_coords1)
 
-            # K-means point filtering if requested (guard undefined attribute)
-            if getattr(self, 'use_kmeans_fg', False) and getattr(self, 'show_only_kmeans_points', False) and len(fg_match_coords1) > self.kmeans_fg_clusters:
+            # K-means point filtering if requested
+            if self.use_kmeans_fg and self.show_only_kmeans_points and len(fg_match_coords1) > self.kmeans_fg_clusters:
                 print(f"Filtering visualization to show only {self.kmeans_fg_clusters} K-means foreground points.")
                 
                 # Select only foreground points for k-means
@@ -844,7 +1403,7 @@ class MemorySAMPredictor:
                 
                 if len(fg_coords1_to_cluster) > self.kmeans_fg_clusters:
                     # Use k-means to find representative points
-                    kmeans_points = self.sparse_matcher._kmeans_sampling(fg_coords1_to_cluster, n_clusters=self.kmeans_fg_clusters)
+                    kmeans_points = self._kmeans_sampling(fg_coords1_to_cluster, n_clusters=self.kmeans_fg_clusters)
                     
                     # Find the original points that are closest to the k-means centers
                     final_indices = []
@@ -863,12 +1422,7 @@ class MemorySAMPredictor:
                     match_similarities = [match_similarities[i] for i in final_indices]
             
             # Print matching results
-            print(f"[DEBUG] 매칭 결과 요약:")
-            print(f"[DEBUG] - 전경 매칭: {len(fg_match_coords1)}개")
-            print(f"[DEBUG] - 배경 매칭: {len(bg_match_coords1) if match_background else 0}개")
-            print(f"[DEBUG] - 총 시각화용 매칭: {len(coords1)}개")
-            print(f"[DEBUG] - 전경 좌표 샘플: {fg_match_coords1[:3] if fg_match_coords1 else 'None'}")
-            print(f"[DEBUG] - 배경 좌표 샘플: {bg_match_coords1[:3] if bg_match_coords1 else 'None'}")
+            print(f"Foreground matches: {len(fg_match_coords1)}, background matches: {len(bg_match_coords1) if match_background else 0}, total matches for vis: {len(coords1)}")
             
             # Place images side-by-side
             h1, w1 = image1.shape[:2]
@@ -883,12 +1437,9 @@ class MemorySAMPredictor:
             image2_resized[:h2, :w2] = image2 if len(image2.shape) == 3 else cv2.cvtColor(image2, cv2.COLOR_GRAY2RGB)
             
             # Combined image
-            print(f"[DEBUG] 결합 이미지 생성: {image1_resized.shape} + {image2_resized.shape}")
             vis_img = np.hstack([image1_resized, image2_resized])
-            print(f"[DEBUG] 최종 시각화 이미지 크기: {vis_img.shape}")
             
             # Visualize matches
-            print(f"[DEBUG] 매칭 포인트 시각화 시작...")
             for i, ((x1, y1), (x2, y2), sim) in enumerate(zip(coords1, coords2, match_similarities)):
                 # Color based on similarity (greener for higher, redder for lower)
                 color = (
@@ -976,7 +1527,6 @@ class MemorySAMPredictor:
             
             # Save result
             if save_path:
-                print(f"[DEBUG] 결과를 {save_path}에 저장 중...")
                 cv2.imwrite(save_path, cv2.cvtColor(vis_img, cv2.COLOR_RGB2BGR))
                 
                 # Also save individual images
@@ -986,9 +1536,7 @@ class MemorySAMPredictor:
                            cv2.cvtColor(img1_points, cv2.COLOR_RGB2BGR))
                 cv2.imwrite(os.path.join(save_dir, f"{base_name}_img2_points.png"), 
                            cv2.cvtColor(img2_points, cv2.COLOR_RGB2BGR))
-                print(f"[DEBUG] 개별 이미지도 저장 완료")
             
-            print(f"[DEBUG] visualize_sparse_matches 완료 - 반환 이미지 크기: {vis_img.shape}, {img1_points.shape}, {img2_points.shape}")
             return vis_img, img1_points, img2_points
             
         except Exception as e:

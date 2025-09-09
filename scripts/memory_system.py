@@ -250,225 +250,112 @@ class MemorySystem:
         # Return top_k most similar items
         return [{"similarity": sim, "item": item} for sim, item in similarities[:top_k]]
     
-    def get_most_similar_sparse(self, patch_features: np.ndarray, mask: Optional[np.ndarray] = None, 
-                               grid_size: Optional[Tuple[int, int]] = None, top_k: int = 1, 
-                               match_threshold: float = 0.8, match_background: bool = True) -> List[Dict]:
+    def get_most_similar_sparse(self, query_patch_features: np.ndarray, grid_size: Tuple[int, int], 
+                               mask: Optional[np.ndarray] = None, top_k: int = 1, 
+                               match_background: bool = True) -> List[Dict]:
         """
-        Get most similar memory items using sparse patch features
-        
-        Args:
-            patch_features: Query patch features (N x D)
-            mask: Optional mask for foreground/background separation
-            grid_size: Feature grid size
-            top_k: Number of top items to return
-            match_threshold: Minimum similarity for matching
-            match_background: Whether to match background areas
-            
-        Returns:
-            List of similar items with similarity scores
+        Get most similar memory items using sparse patch features, simplified for robustness.
         """
         if not self.index["items"]:
             return []
-        
-        # 쿼리 패치 특징 정규화
-        query_features = patch_features.copy()
-        
-        # 결과 리스트
+
         similar_items = []
-        
-        # 마스크가 있는 경우 전경/배경 분리
-        if mask is not None and grid_size is not None:
-            # 마스크를 그리드 크기로 조정
-            grid_h, grid_w = grid_size
-            mask_resized = cv2.resize(
-                mask.astype(np.uint8),
-                (grid_w, grid_h),
-                interpolation=cv2.INTER_NEAREST
-            ).astype(bool)
-            
-            # 전경/배경 인덱스 가져오기
-            fg_indices = np.where(mask_resized.flatten())[0]
-            bg_indices = np.where(~mask_resized.flatten())[0]
-            
-            # 전경/배경 특징만큼 자르기
-            fg_query_features = query_features[fg_indices] if len(fg_indices) > 0 else None
-            bg_query_features = query_features[bg_indices] if len(bg_indices) > 0 and match_background else None
-        else:
-            fg_query_features = query_features
-            bg_query_features = None
-        
-        # 각 메모리 항목과 비교
+
         for item in self.index["items"]:
             try:
-                item_id = item["id"]
-                
-                # 패치 특징이 있는지 확인
                 if "patch_features_path" not in item:
                     continue
-                
-                # 패치 특징 로드
-                patch_features_path = self.memory_dir / item["patch_features_path"]
-                
-                # 절대 경로로 변환 (존재하지 않는 경우를 위한 예외 처리)
-                patch_features_path = os.path.abspath(patch_features_path)
-                
-                # 파일이 존재하는지 확인 (더 명확한 에러 메시지)
-                if not os.path.exists(patch_features_path):
-                    print(f"패치 특징 파일이 존재하지 않습니다: {patch_features_path}")
+
+                item_data = self.load_item_data(item["id"])
+                item_patch_features = item_data.get("patch_features")
+                item_mask = item_data.get("mask")
+
+                if item_patch_features is None:
                     continue
                 
-                try:
-                    # 패치 특징 로드 시도
-                    item_patch_features = np.load(str(patch_features_path))
-                except Exception as e:
-                    print(f"Error processing item ID {item_id}: {e}")
-                    continue
-                
-                # 패치 정보 로드
-                item_grid_size = None
-                
-                # 패치 정보 경로 구성
-                patch_info_path = self.memory_dir / Path(item["patch_features_path"]).parent / "patch_info.json"
-                
-                # 정보 파일 존재 확인
-                if os.path.exists(patch_info_path):
-                    try:
-                        with open(patch_info_path, 'r') as f:
-                            patch_info = json.load(f)
-                            item_grid_size = tuple(patch_info["grid_size"])
-                    except Exception as e:
-                        print(f"패치 정보를 읽는 중 오류: {e}")
-                
-                # 마스크 로드 (전경/배경 분리용)
-                item_mask = None
-                if mask is not None and grid_size is not None and item_grid_size is not None:
-                    try:
-                        # 마스크 파일 경로
-                        mask_path = self.memory_dir / item["mask_path"]
-                        
-                        # 절대 경로로 변환
-                        mask_path = os.path.abspath(mask_path)
-                        
-                        # 마스크 로드
-                        if os.path.exists(mask_path):
-                            item_mask = np.array(Image.open(mask_path))
-                            
-                            # 다중 채널 마스크 처리
-                            if len(item_mask.shape) > 2:
-                                item_mask = item_mask[:, :, 0]
-                            
-                            # 이진 마스크로 변환
-                            item_mask = item_mask > 0
-                            
-                            # 그리드 크기로 조정
-                            item_mask_resized = cv2.resize(
-                                item_mask.astype(np.uint8),
-                                (item_grid_size[1], item_grid_size[0]),
-                                interpolation=cv2.INTER_NEAREST
-                            ).astype(bool)
-                            
-                            # 전경/배경 인덱스 가져오기
-                            item_fg_indices = np.where(item_mask_resized.flatten())[0]
-                            item_bg_indices = np.where(~item_mask_resized.flatten())[0]
-                            
-                            # 유효성 검사
-                            if len(item_fg_indices) == 0:
-                                print(f"항목 {item_id} 마스크에 전경이 없습니다.")
-                        else:
-                            print(f"마스크 파일을 찾을 수 없습니다: {mask_path}")
-                            continue
-                            
-                    except Exception as e:
-                        print(f"마스크 처리 중 오류: {e}")
-                        continue
-                
-                # 전경/배경 분리 매칭
-                fg_similarity = 0.0
-                bg_similarity = 0.0
-                
-                # 전경 매칭
-                if fg_query_features is not None and item_mask is not None:
-                    try:
-                        # 아이템 전경 특징
-                        item_fg_features = item_patch_features[item_fg_indices]
-                        
-                        if len(item_fg_features) > 0 and len(fg_query_features) > 0:
-                            # 모든 쿼리 전경 특징에 대해 각 아이템 전경 특징의 최대 유사도 계산
-                            similarities = np.zeros(len(fg_query_features))
-                            for i, query_feat in enumerate(fg_query_features):
-                                # 정규화
-                                query_feat_norm = query_feat / np.linalg.norm(query_feat)
-                                item_features_norm = item_fg_features / np.linalg.norm(item_fg_features, axis=1, keepdims=True)
-                                
-                                # 코사인 유사도 계산
-                                cosine_sims = np.dot(item_features_norm, query_feat_norm)
-                                similarities[i] = np.max(cosine_sims)
-                            
-                            # 매치율 계산 (임계값 이상 유사한 특징의 비율)
-                            fg_match_ratio = np.mean(similarities >= match_threshold)
-                            fg_similarity = np.mean(similarities) * fg_match_ratio
-                            
-                            print(f"Item ID {item_id} foreground similarity: {fg_similarity:.6f}, match ratio: {fg_match_ratio:.6f}")
-                    except Exception as e:
-                        print(f"전경 매칭 중 오류: {e}")
-                        fg_similarity = 0.0
-                
-                # 배경 매칭 (활성화된 경우)
-                if bg_query_features is not None and item_mask is not None and match_background:
-                    try:
-                        # 아이템 배경 특징
-                        item_bg_features = item_patch_features[item_bg_indices]
-                        
-                        if len(item_bg_features) > 0 and len(bg_query_features) > 0:
-                            # 모든 쿼리 배경 특징에 대해 각 아이템 배경 특징의 최대 유사도 계산
-                            similarities = np.zeros(len(bg_query_features))
-                            for i, query_feat in enumerate(bg_query_features):
-                                # 정규화
-                                query_feat_norm = query_feat / np.linalg.norm(query_feat)
-                                item_features_norm = item_bg_features / np.linalg.norm(item_bg_features, axis=1, keepdims=True)
-                                
-                                # 코사인 유사도 계산
-                                cosine_sims = np.dot(item_features_norm, query_feat_norm)
-                                similarities[i] = np.max(cosine_sims)
-                            
-                            # 매치율 계산 (임계값 이상 유사한 특징의 비율)
-                            bg_match_ratio = np.mean(similarities >= match_threshold)
-                            bg_similarity = np.mean(similarities) * bg_match_ratio
-                            
-                            print(f"Item ID {item_id} background similarity: {bg_similarity:.6f}, match ratio: {bg_match_ratio:.6f}")
-                    except Exception as e:
-                        print(f"배경 매칭 중 오류: {e}")
-                        bg_similarity = 0.0
-                
-                # 최종 유사도 계산 (전경 70%, 배경 30% 가중치)
+                # Reshape features from (C, H, W) to (H*W, C)
+                query_features_flat = query_patch_features.reshape(query_patch_features.shape[0], -1).T
+                item_features_flat = item_patch_features.reshape(item_patch_features.shape[0], -1).T
+
+                fg_sim = 0.0
+                bg_sim = 0.0
+
+                # Foreground matching
                 if mask is not None and item_mask is not None:
-                    if match_background:
-                        final_similarity = 0.7 * fg_similarity + 0.3 * bg_similarity
-                    else:
-                        final_similarity = fg_similarity
-                else:
-                    # 전체 특징 매칭
-                    final_similarity = self._compare_patch_features(query_features, item_patch_features)
+                    query_fg_features = self._get_masked_features(query_features_flat, mask, grid_size, invert=False)
+                    item_fg_features = self._get_masked_features(item_features_flat, item_mask, item_data.get("grid_size"), invert=False)
+                    if query_fg_features is not None and item_fg_features is not None:
+                        fg_sim = self._calculate_feature_similarity(query_fg_features, item_fg_features)
                 
-                print(f"Item ID {item_id} final similarity: {final_similarity:.6f}")
+                # Background matching
+                if match_background and mask is not None and item_mask is not None:
+                    query_bg_features = self._get_masked_features(query_features_flat, mask, grid_size, invert=True)
+                    item_bg_features = self._get_masked_features(item_features_flat, item_mask, item_data.get("grid_size"), invert=True)
+                    if query_bg_features is not None and item_bg_features is not None:
+                        bg_sim = self._calculate_feature_similarity(query_bg_features, item_bg_features)
+
+                # If no masks, compare all features
+                if mask is None or item_mask is None:
+                    fg_sim = self._calculate_feature_similarity(query_features_flat, item_features_flat)
                 
-                # 결과 리스트에 추가
+                # Final similarity score
+                final_similarity = fg_sim + (bg_sim * 0.2) # Give less weight to background
+
                 if final_similarity > 0:
                     similar_items.append({
                         "item": item,
                         "similarity": float(final_similarity),
-                        "has_patch_features": True
                     })
+
             except Exception as e:
                 import traceback
-                print(f"Error processing item ID {item['id']}: {e}")
+                print(f"Error processing item ID {item['id']} for sparse matching: {e}")
                 traceback.print_exc()
-        
-        # 유사도로 정렬
+
         similar_items.sort(key=lambda x: x["similarity"], reverse=True)
-        
-        # top_k 반환
         return similar_items[:top_k]
+
+    def _get_masked_features(self, features_flat, mask, grid_size, invert=False):
+        if grid_size is None: return None
+        
+        # Ensure mask is single channel
+        if mask.ndim == 3:
+            mask = cv2.cvtColor(mask, cv2.COLOR_RGB2GRAY)
+        
+        mask_resized = cv2.resize(mask.astype(np.uint8), (grid_size[1], grid_size[0])).astype(bool)
+        
+        if invert:
+            mask_resized = ~mask_resized
+            
+        indices = np.where(mask_resized.flatten())[0]
+        
+        if len(indices) == 0 or len(indices) > len(features_flat): return None
+
+        return features_flat[indices]
+
+    def _calculate_feature_similarity(self, features1, features2):
+        if features1 is None or features2 is None or len(features1) == 0 or len(features2) == 0:
+            return 0.0
+
+        # Ensure arrays are C-contiguous and float32 for Faiss/sklearn
+        f1 = np.ascontiguousarray(features1, dtype=np.float32)
+        f2 = np.ascontiguousarray(features2, dtype=np.float32)
+
+        # Normalize features
+        faiss.normalize_L2(f1)
+        faiss.normalize_L2(f2)
+
+        # Use NearestNeighbors to find average distance (as a measure of similarity)
+        # We find the 2 nearest neighbors to avoid matching a point with itself if sets are identical
+        k = min(2, len(f2))
+        nbrs = NearestNeighbors(n_neighbors=k, algorithm='auto').fit(f2)
+        distances, _ = nbrs.kneighbors(f1)
+        
+        avg_distance = np.mean(distances[:, 0]) # Use the distance to the 1st nearest neighbor
+        
+        # Convert distance to similarity (e.g., exponential decay)
+        similarity = np.exp(-avg_distance * 5.0)
+        return similarity
     
     def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
         """Calculate cosine similarity between two vectors"""
@@ -569,36 +456,66 @@ class MemorySystem:
             return 0.0
         
         try:
-            # 쿼리 피처와 항목 피처 중 더 적은 수를 기준으로 샘플링
-            max_features = min(len(query_features), len(item_features), 100)  # 최대 100개
+            # 피처 차원 확인 및 디버깅 정보 출력
+            print(f"Query features shape: {query_features.shape}, Item features shape: {item_features.shape}")
             
-            if len(query_features) > max_features:
-                # 랜덤 샘플링
-                indices = np.random.choice(len(query_features), max_features, replace=False)
-                sampled_query_features = query_features[indices]
-            else:
-                sampled_query_features = query_features
+            # 차원이 다른 경우 처리
+            if query_features.shape != item_features.shape:
+                print(f"Warning: Feature shape mismatch. Query: {query_features.shape}, Item: {item_features.shape}")
+                # 더 작은 차원에 맞춰 조정
+                min_shape = tuple(min(q, i) for q, i in zip(query_features.shape, item_features.shape))
                 
-            if len(item_features) > max_features:
-                # 랜덤 샘플링
-                indices = np.random.choice(len(item_features), max_features, replace=False)
-                sampled_item_features = item_features[indices]
+                if len(query_features.shape) == 3:  # (C, H, W) 형태
+                    query_features = query_features[:min_shape[0], :min_shape[1], :min_shape[2]]
+                    item_features = item_features[:min_shape[0], :min_shape[1], :min_shape[2]]
+                elif len(query_features.shape) == 2:  # (N, C) 형태
+                    query_features = query_features[:min_shape[0], :min_shape[1]]
+                    item_features = item_features[:min_shape[0], :min_shape[1]]
+                
+                print(f"Adjusted shapes - Query: {query_features.shape}, Item: {item_features.shape}")
+            
+            # 패치 피처를 1D로 평탄화 (3D인 경우)
+            if len(query_features.shape) == 3:
+                # (C, H, W) -> (H*W, C)
+                C, H, W = query_features.shape
+                query_flat = query_features.reshape(C, H*W).T  # (H*W, C)
+                item_flat = item_features.reshape(C, H*W).T    # (H*W, C)
             else:
-                sampled_item_features = item_features
+                # 이미 2D인 경우
+                query_flat = query_features
+                item_flat = item_features
+            
+            # 샘플링으로 계산량 줄이기 (결정적 간격 샘플링)
+            max_features = min(len(query_flat), len(item_flat), 100)
+
+            def uniform_sample(arr, k):
+                if len(arr) <= k:
+                    return arr
+                # 균등 간격 인덱스 선택 (결정적)
+                idx = np.linspace(0, len(arr) - 1, num=k, dtype=int)
+                return arr[idx]
+
+            sampled_query = uniform_sample(query_flat, max_features)
+            sampled_item = uniform_sample(item_flat, max_features)
             
             # 피처 정규화
-            normalized_query = np.zeros_like(sampled_query_features)
-            normalized_item = np.zeros_like(sampled_item_features)
+            normalized_query = np.zeros_like(sampled_query)
+            normalized_item = np.zeros_like(sampled_item)
             
             for i in range(len(normalized_query)):
-                norm = np.linalg.norm(sampled_query_features[i])
+                norm = np.linalg.norm(sampled_query[i])
                 if norm > 0:
-                    normalized_query[i] = sampled_query_features[i] / norm
+                    normalized_query[i] = sampled_query[i] / norm
                     
             for i in range(len(normalized_item)):
-                norm = np.linalg.norm(sampled_item_features[i])
+                norm = np.linalg.norm(sampled_item[i])
                 if norm > 0:
-                    normalized_item[i] = sampled_item_features[i] / norm
+                    normalized_item[i] = sampled_item[i] / norm
+            
+            # 차원 확인 후 유사도 행렬 계산
+            if normalized_query.shape[1] != normalized_item.shape[1]:
+                print(f"Error: Feature dimension mismatch after normalization. Query: {normalized_query.shape}, Item: {normalized_item.shape}")
+                return 0.0
             
             # 유사도 행렬 계산
             similarity_matrix = np.matmul(normalized_query, normalized_item.T)
@@ -612,5 +529,7 @@ class MemorySystem:
             return float(mean_similarity)
             
         except Exception as e:
+            import traceback
             print(f"패치 피처 비교 중 오류: {e}")
+            print(f"Traceback: {traceback.format_exc()}")
             return 0.0

@@ -46,9 +46,21 @@ class FileManager:
         except Exception as e:
             print(f"zenity 기반 폴더 브라우저 실패: {e}")
 
-        # 3) 실패 시 빈 문자열 반환
-        print("폴더 브라우저 열기 실패: 지원되는 브라우저를 찾지 못했습니다.")
-        return ""
+        # 3) KDE 환경에서 kdialog가 있으면 사용
+        try:
+            if shutil.which("kdialog"):
+                result = subprocess.run(['kdialog', '--getexistingdirectory'],
+                                        capture_output=True, text=True)
+                if result.returncode == 0:
+                    return result.stdout.strip()
+        except Exception as e:
+            print(f"kdialog 기반 폴더 브라우저 실패: {e}")
+
+        # 4) 환경에 GUI가 없을 수 있음: 안전한 폴백으로 현재 작업 디렉토리 반환
+        #    사용자가 텍스트 박스에서 경로를 수정할 수 있도록 기본값을 채워줌
+        cwd = os.getcwd()
+        print("폴더 브라우저 열기 실패: GUI 미지원 환경으로 판단. 현재 작업 디렉토리를 기본값으로 반환합니다:", cwd)
+        return cwd
     
     @staticmethod
     def collect_image_files(folder_path: str) -> List[str]:

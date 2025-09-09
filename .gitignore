@@ -20,3 +20,20 @@ demo/backend/checkpoints/*.pt
 memory/*.bin
 checkpoints/**
 demo/backend/checkpoints/**
+
+# Excluded directories for clean repository
+analyze/
+dinov3_weights/
+processed_result/
+process_code/
+memory/
+assets/
+backup/
+scripts copy/
+tools/
+ui copy/
+training/
+results_5pos/
+results_sota/
+results/
+results_original/

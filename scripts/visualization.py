@@ -27,9 +27,12 @@ class Visualization:
                 mask = cv2.resize(mask.astype(np.uint8), (image.shape[1], image.shape[0]), interpolation=cv2.INTER_NEAREST)
 
         binary_mask = mask > 0
-        color_mask = np.zeros_like(vis, dtype=np.uint8)
-        color_mask[binary_mask] = [30, 144, 255]
-        cv2.addWeighted(color_mask, alpha, vis, 1 - alpha, 0, vis)
+        # Blend only inside the mask to avoid darkening outside the mask
+        if np.any(binary_mask):
+            vis_float = vis.astype(np.float32)
+            color = np.array([30, 144, 255], dtype=np.float32)
+            vis_float[binary_mask] = vis_float[binary_mask] * (1.0 - float(alpha)) + color * float(alpha)
+            vis = vis_float.astype(np.uint8)
         contours, _ = cv2.findContours(binary_mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(vis, contours, -1, (255, 255, 255), 1)
         return vis

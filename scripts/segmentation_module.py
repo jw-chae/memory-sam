@@ -26,6 +26,19 @@ class SegmentationModule:
         self.last_result = None
         self.sparse_visualizer = SparseMatchVisualizer(memory_sam_predictor)
         
+    def prepare_input_data(self, files: Union[List[Any], str, Path], folder_path: str = "") -> Union[str, Any]:
+        """
+        Prepare input data (file or folder)
+        
+        Args:
+            files: File upload or file path
+            folder_path: Folder path input
+            
+        Returns:
+            Input data to process
+        """
+        return prepare_input_data(files, folder_path)
+        
     def process_image(self, 
                      files: Union[List[Any], str, Path], 
                      reference_path: str = None, 
@@ -33,7 +46,9 @@ class SegmentationModule:
                      use_sparse_matching: bool = True,
                      match_background: bool = True,
                      skip_clustering: bool = False,
-                     auto_add_to_memory: bool = False) -> Tuple:
+                     auto_add_to_memory: bool = False,
+                     max_positive_points: int = 1,
+                     max_negative_points: int = 1) -> Tuple:
         """
         Process image or folder
         
@@ -45,14 +60,20 @@ class SegmentationModule:
             match_background: Whether to match background area
             skip_clustering: Whether to skip clustering
             auto_add_to_memory: Whether to automatically add to memory after processing
+            max_positive_points: Maximum number of positive (foreground) points to use
+            max_negative_points: Maximum number of negative (background) points to use
             
         Returns:
             Processing result tuple (visualized image, mask, gallery items, info, etc.)
         """
         if not files:
-            return None, None, [], "Please select an image.", None, None, None, None, "Please select an image.", None, None, None
+            # UI 변경 이벤트 시 입력이 없을 수 있으므로 조용히 빈 결과 반환
+            return None, None, [], "", None, None, None, None, "", None, None, None
         
         # 메모리 시스템에 클러스터링 설정 저장
+        print("[SEG] ===== Segmentation start =====")
+        print(f"[SEG] use_sparse_matching: {use_sparse_matching}, match_background: {match_background}, skip_clustering: {skip_clustering}")
+        print(f"[SEG] max_positive_points: {max_positive_points}, max_negative_points: {max_negative_points}")
         self.memory_sam.skip_clustering = skip_clustering
         hybrid_clustering = getattr(self.memory_sam, 'hybrid_clustering', False)
         
@@ -60,9 +81,11 @@ class SegmentationModule:
             # Prepare input data
             image_path = prepare_input_data(files)
             if image_path is None:
-                return None, None, [], "No valid input.", None, None, None, None, "No valid input.", None, None, None
+                return None, None, [], "", None, None, None, None, "", None, None, None
             
             # Process with segmentation
+            import time
+            t0 = time.time()
             result = self.memory_sam.process_image(
                 image_path=image_path,
                 reference_path=reference_path,
@@ -70,8 +93,11 @@ class SegmentationModule:
                 use_sparse_matching=use_sparse_matching,
                 match_background=match_background,
                 skip_clustering=skip_clustering,
-                auto_add_to_memory=auto_add_to_memory
+                auto_add_to_memory=auto_add_to_memory,
+                max_positive_points=max_positive_points,
+                max_negative_points=max_negative_points
             )
+            print(f"[SEG] process_image elapsed: {time.time()-t0:.3f}s")
             
             # --- 결과 처리 로직 재구성 ---
             
@@ -89,6 +115,7 @@ class SegmentationModule:
                  raise ValueError("Processing returned no results.")
             
             representative_result = results_list[0]
+            print(f"[SEG] representative score: {representative_result.get('score')}")
             
             # Process basic results for the representative image
             mask_vis = (representative_result["mask"] * 255).astype(np.uint8)
@@ -190,6 +217,28 @@ class SegmentationModule:
             sparse_match_vis = representative_result.get("sparse_match_visualization")
             img1_points = representative_result.get("img1_points")
             img2_points = representative_result.get("img2_points")
+
+            # 최종 선택된 FG/BG 포인트와 전체 후보 포인트를 덧그려 사용자 확인 가능하게 개선
+            try:
+                if sparse_match_vis is not None and hasattr(self.memory_sam, 'last_fg_prompt_points'):
+                    vis = sparse_match_vis.copy()
+                    show_only = bool(getattr(self.memory_sam, 'last_show_only_kmeans_points', False))
+                    if not show_only:
+                        # 전체 후보: 옅은 점 (메모리 이미지 쪽에만 표시)
+                        if hasattr(self.memory_sam, 'last_all_fg_candidates') and self.memory_sam.last_all_fg_candidates:
+                            for x, y in self.memory_sam.last_all_fg_candidates[:2000]:
+                                cv2.circle(vis, (int(x), int(y)), 2, (200, 220, 255), -1)
+                        if hasattr(self.memory_sam, 'last_all_bg_candidates') and self.memory_sam.last_all_bg_candidates:
+                            for x, y in self.memory_sam.last_all_bg_candidates[:2000]:
+                                cv2.circle(vis, (int(x), int(y)), 2, (255, 200, 200), -1)
+                    # 최종 선택: 진한 큰 점
+                    for x, y in getattr(self.memory_sam, 'last_fg_prompt_points', []) or []:
+                        cv2.circle(vis, (int(x), int(y)), 6, (30, 144, 255), -1)
+                    for x, y in getattr(self.memory_sam, 'last_bg_prompt_points', []) or []:
+                        cv2.circle(vis, (int(x), int(y)), 6, (255, 80, 80), -1)
+                    sparse_match_vis = vis
+            except Exception as e:
+                print(f"Post overlay of prompt points failed: {e}")
             
             # 마지막 결과 저장
             self.last_result = {

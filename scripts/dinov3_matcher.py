@@ -1,331 +1,347 @@
+"""
+DINOv3 기반 이미지 매칭 - 노트북과 정확히 동일한 구현
+"""
 import torch
-import torchvision.transforms as transforms
+import torch.nn.functional as F
+import torchvision.transforms.functional as TF
 from PIL import Image
 import numpy as np
-from sklearn.decomposition import PCA
-from typing import Tuple, Optional
-import faiss
+from typing import Tuple, List, Optional
+
 
 class Dinov3Matcher:
-    """DINOv3 기반 이미지 매칭을 위한 클래스"""
-
-    def __init__(self, 
-                repo_name="facebookresearch/dinov3", 
-                model_name="dinov3_vitl16", 
-                smaller_edge_size=448, 
-                half_precision=False, 
-                device="cuda"):
-        """
-        DINOv3 Matcher 초기화
-        
-        Args:
-            repo_name: DINOv3 모델이 있는 리포지토리 이름
-            model_name: 사용할 DINOv3 모델 이름
-            smaller_edge_size: 입력 이미지의 작은 쪽 크기 조정
-            half_precision: 절반 정밀도 사용 여부 (메모리 절약)
-            device: 사용할 장치 ('cuda' 또는 'cpu')
-        """
-        self.repo_name = repo_name
+    """DINOv3 노트북의 sparse matching 로직을 정확히 구현"""
+    
+    def __init__(self,
+                 model_name: str = "dinov3_vitl16",
+                 image_size: int = 768,
+                 patch_size: int = 16,
+                 device: str = "cuda"):
         self.model_name = model_name
-        self.smaller_edge_size = smaller_edge_size
-        self.half_precision = half_precision
+        self.image_size = image_size
+        self.patch_size = patch_size
         self.device = device
-
-        # 모델 로드 - DINOv3 사전 훈련된 가중치 사용
-        import sys
+        
+        # ImageNet 정규화 상수
+        self.mean = (0.485, 0.456, 0.406)
+        self.std = (0.229, 0.224, 0.225)
+        
+        # 모델별 레이어 수
+        self.model_to_layers = {
+            "dinov3_vits16": 12,
+            "dinov3_vits16plus": 12,
+            "dinov3_vitb16": 12,
+            "dinov3_vitl16": 24,
+            "dinov3_vith16plus": 32,
+            "dinov3_vit7b16": 40,
+        }
+        self.n_layers = self.model_to_layers.get(model_name, 24)
+        
+        # DINOv3 모델 로드
+        print(f"Loading DINOv3 model: {model_name}")
+        
+        # 로컬 가중치 및 로컬 리포지토리 우선 사용
         import os
-        dinov3_path = "/home/joongwon00/dinov3"
-        if dinov3_path not in sys.path:
-            sys.path.append(dinov3_path)
+        import shutil
+        WEIGHTS_DIR = "/home/joongwon00/memory-sam/dinov3_weights"
+        LOCAL_REPO_DIR = "/home/joongwon00/memory-sam/vendor/dinov3"
+        HUB_CACHE_REPO_DIR = "/home/joongwon00/.cache/torch/hub/facebookresearch_dinov3_main"
+        CHECKPOINTS_DIR = os.path.join(os.path.expanduser("~"), ".cache", "torch", "hub", "checkpoints")
+        os.makedirs(CHECKPOINTS_DIR, exist_ok=True)
         
-        from dinov3.models.vision_transformer import DinoVisionTransformer
+        # 모델명 -> 가중치 파일 매핑
+        weights_map = {
+            "dinov3_vitl16": "dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth",
+            "dinov3_vitb16": "dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth",
+            "dinov3_vits16": "dinov3_vits16_pretrain_lvd1689m-08c60483.pth",
+            "dinov3_vits16plus": "dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth",
+            # vit7b16은 여러 변형이 있으므로 가벼운 linear head 버전으로 기본 설정
+            "dinov3_vit7b16": "dinov3_vit7b16_imagenet1k_linear_head-90d8ed92.pth",
+        }
         
-        # DINOv3 ViT-L/16 모델 생성 (대형 모델)
-        self.model = DinoVisionTransformer(
-            img_size=518,
-            patch_size=16,
-            embed_dim=1024,
-            depth=24,
-            num_heads=16,
-            mlp_ratio=4,
-            block_chunks=0
+        local_weight_path = os.path.join(WEIGHTS_DIR, weights_map.get(model_name, "")) if model_name in weights_map else None
+        if local_weight_path and os.path.exists(local_weight_path):
+            dest_weight_path = os.path.join(CHECKPOINTS_DIR, os.path.basename(local_weight_path))
+            if not os.path.exists(dest_weight_path):
+                shutil.copyfile(local_weight_path, dest_weight_path)
+                print(f"Copied weights to torch hub cache: {dest_weight_path}")
+        else:
+            if model_name in weights_map:
+                print(f"Warning: Local weight not found for {model_name} at {local_weight_path}")
+            else:
+                print(f"Warning: No weight mapping for model {model_name}. Proceeding without local weight copy.")
+        
+        # 1) 로컬 리포지토리가 있으면 우선 사용 (네트워크 접근 방지)
+        try:
+            if os.path.isdir(LOCAL_REPO_DIR):
+                print(f"Loading DINOv3 from local repo: {LOCAL_REPO_DIR}")
+                self.model = torch.hub.load(
+                    repo_or_dir=LOCAL_REPO_DIR,
+                    model=model_name,
+                    source="local"
+                )
+            elif os.path.isdir(HUB_CACHE_REPO_DIR):
+                print(f"Loading DINOv3 from hub cache repo: {HUB_CACHE_REPO_DIR}")
+                self.model = torch.hub.load(
+                    repo_or_dir=HUB_CACHE_REPO_DIR,
+                    model=model_name,
+                    source="local"
+                )
+            else:
+                raise FileNotFoundError(f"Local repos not found: {LOCAL_REPO_DIR} or {HUB_CACHE_REPO_DIR}")
+        except Exception as e_local:
+            print(f"Local load failed ({e_local}). Falling back to GitHub.")
+            # 2) 로컬 리포 없거나 실패 시 GitHub 사용 (허브 캐시의 가중치 활용)
+            self.model = torch.hub.load(
+                repo_or_dir="facebookresearch/dinov3",
+                model=model_name,
+                source="github"
+            )
+        self.model = self.model.to(self.device)
+        self.model.eval()
+        
+        # 마스크 양자화 필터 (16x16 box blur)
+        self.patch_quant_filter = torch.nn.Conv2d(1, 1, patch_size, stride=patch_size, bias=False)
+        self.patch_quant_filter.weight.data.fill_(1.0 / (patch_size * patch_size))
+        self.patch_quant_filter = self.patch_quant_filter.to(self.device)
+    
+    def resize_transform(self, image: Image.Image) -> torch.Tensor:
+        """노트북과 동일한 리사이즈: 세로 패치 수 고정, 가로는 비율로 계산"""
+        w, h = image.size
+        h_patches = int(self.image_size / self.patch_size)
+        w_patches = int((w * self.image_size) / (h * self.patch_size))
+        target_h = h_patches * self.patch_size
+        target_w = w_patches * self.patch_size
+        return TF.to_tensor(TF.resize(image, (target_h, target_w)))
+    
+    def prepare_image(self, rgb_image_numpy: np.ndarray) -> Tuple[torch.Tensor, Tuple[int, int], float]:
+        """이미지 준비: 리사이즈 + 정규화"""
+        image = Image.fromarray(rgb_image_numpy)
+        w, h = image.size
+        
+        # 리사이즈
+        image_tensor = self.resize_transform(image)
+        
+        # 정규화
+        image_tensor = TF.normalize(image_tensor, mean=self.mean, std=self.std)
+        
+        # 그리드 크기 계산
+        h_patches = int(self.image_size / self.patch_size)
+        w_patches = int((w * self.image_size) / (h * self.patch_size))
+        grid_size = (h_patches, w_patches)
+        
+        # 리사이즈 스케일 (원본으로 되돌리기 위한)
+        resize_scale = h / self.image_size
+        
+        return image_tensor, grid_size, resize_scale
+    
+    def prepare_mask(self, mask_numpy: np.ndarray, grid_size: Tuple[int, int]) -> torch.Tensor:
+        """마스크를 패치 그리드로 양자화"""
+        # 마스크를 단일 채널로 변환
+        if mask_numpy.ndim > 2:
+            mask_numpy = mask_numpy[:, :, 0]
+        
+        # 0-255 범위로 변환
+        if mask_numpy.max() <= 1:
+            mask_numpy = (mask_numpy > 0).astype(np.uint8) * 255
+        else:
+            mask_numpy = mask_numpy.astype(np.uint8)
+        
+        # PIL Image로 변환
+        mask_pil = Image.fromarray(mask_numpy, mode='L')
+        
+        # 타겟 크기로 리사이즈
+        h_patches, w_patches = grid_size
+        target_h = h_patches * self.patch_size
+        target_w = w_patches * self.patch_size
+        
+        # 텐서로 변환하고 리사이즈
+        mask_tensor = TF.to_tensor(TF.resize(mask_pil, (target_h, target_w)))
+        mask_tensor = mask_tensor.to(self.device)
+        
+        # 양자화 필터 적용
+        with torch.no_grad():
+            mask_quantized = self.patch_quant_filter(mask_tensor.unsqueeze(0))
+        
+        return mask_quantized.squeeze().cpu()
+    
+    def extract_features(self, image_tensor: torch.Tensor) -> torch.Tensor:
+        """노트북과 동일한 특징 추출"""
+        with torch.no_grad():
+            image_batch = image_tensor.unsqueeze(0).to(self.device)
+            
+            # get_intermediate_layers 호출
+            feats = self.model.get_intermediate_layers(
+                image_batch, 
+                n=range(self.n_layers), 
+                reshape=True, 
+                norm=True
+            )
+            
+            # 마지막 레이어 사용
+            features = feats[-1].squeeze().cpu()  # [D, H, W]
+            
+        return features
+    
+    def extract_global_features(self, image: np.ndarray) -> np.ndarray:
+        """전역 특징 추출 (CLS 토큰만 사용, L2 정규화)"""
+        # 이미지 준비
+        image_tensor, _, _ = self.prepare_image(image)
+        
+        with torch.no_grad():
+            image_batch = image_tensor.unsqueeze(0).to(self.device)
+            
+            # 모델에서 특징 추출
+            feats = self.model.get_intermediate_layers(
+                image_batch, 
+                n=range(self.n_layers), 
+                reshape=False,  # CLS 토큰을 위해 reshape=False
+                norm=True
+            )
+            
+            # 마지막 레이어 사용
+            features = feats[-1].squeeze()  # [num_patches + 1, D]
+            
+            # CLS 토큰 (첫 번째 토큰)만 사용
+            cls_token = features[0]  # [D] = [768]
+            
+            # L2 정규화
+            global_features = F.normalize(cls_token, p=2, dim=0)
+            
+        return global_features.cpu().numpy()
+    
+    def match_images(self, 
+                    image1: np.ndarray, 
+                    image2: np.ndarray,
+                    mask1: Optional[np.ndarray] = None,
+                    mask2: Optional[np.ndarray] = None,
+                    stratify_threshold: float = 100.0) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
+        """노트북과 동일한 sparse matching 수행"""
+        
+        # 이미지 준비
+        tensor1, grid_size1, scale1 = self.prepare_image(image1)
+        tensor2, grid_size2, scale2 = self.prepare_image(image2)
+        
+        # 특징 추출
+        features1 = self.extract_features(tensor1)  # [D, H1, W1]
+        features2 = self.extract_features(tensor2)  # [D, H2, W2]
+        
+        # 특징 정규화 (중요: dim=0으로 정규화)
+        features1 = F.normalize(features1, p=2, dim=0)
+        features2 = F.normalize(features2, p=2, dim=0)
+        
+        # 마스크 처리
+        if mask1 is not None:
+            mask1_quantized = self.prepare_mask(mask1, grid_size1)
+        else:
+            mask1_quantized = torch.ones(grid_size1)
+            
+        if mask2 is not None:
+            mask2_quantized = self.prepare_mask(mask2, grid_size2)
+        else:
+            mask2_quantized = torch.ones(grid_size2)
+        
+        # 차원 정보
+        dim = features1.shape[0]
+        n_patches1 = features1.shape[1] * features1.shape[2]
+        n_patches2 = features2.shape[1] * features2.shape[2]
+        
+        # 코사인 유사도 히트맵 계산
+        # 노트북의 einsum 연산과 정확히 동일
+        heatmaps = torch.einsum(
+            "d n, d h w -> n h w",
+            features1.view(dim, -1),
+            features2
         )
         
-        # 사전 훈련된 가중치 로드
-        weights_path = "/home/joongwon00/memory-sam/dinov3_weights/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
-        if os.path.exists(weights_path):
-            print(f"Loading pretrained weights from: {weights_path}")
-            state_dict = torch.load(weights_path, map_location="cpu")
-            self.model.load_state_dict(state_dict, strict=False)
-            print("Pretrained weights loaded successfully")
-        else:
-            print("Warning: Pretrained weights not found, using random initialization")
+        # 왼쪽 이미지의 2D 패치 위치 계산
+        patch_indices_left = torch.arange(n_patches1)
+        locs_2d_left = (
+            torch.stack([
+                patch_indices_left // features1.shape[2],  # row
+                patch_indices_left % features1.shape[2]    # col
+            ], dim=-1) + 0.5
+        ) * self.patch_size
         
-        if self.half_precision:
-            self.model = self.model.half().to(self.device)
-        else:
-            self.model = self.model.to(self.device)
-
-        self.model.eval()
-
-        # 이미지 전처리 파이프라인
-        self.transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
-        ])
-
-    def prepare_image(self, rgb_image_numpy: np.ndarray) -> Tuple[torch.Tensor, Tuple[int, int], float]:
-        """
-        이미지를 DINOv3 처리를 위해 준비합니다. 종횡비를 유지하며 리사이즈하고 패딩을 추가합니다.
-        """
-        image = Image.fromarray(rgb_image_numpy)
-        original_w, original_h = image.size
-
-        # 종횡비를 유지하며 smaller_edge_size에 맞게 크기 계산
-        scale = self.smaller_edge_size / min(original_w, original_h)
-        resized_w, resized_h = int(original_w * scale), int(original_h * scale)
-        image_resized = image.resize((resized_w, resized_h), Image.Resampling.BICUBIC)
+        # 오른쪽 이미지의 대응 패치 찾기 (argmax)
+        patch_indices_right = torch.flatten(heatmaps, start_dim=-2).argmax(dim=-1)
+        locs_2d_right = (
+            torch.stack([
+                patch_indices_right // features2.shape[2],  # row
+                patch_indices_right % features2.shape[2]    # col
+            ], dim=-1) + 0.5
+        ) * self.patch_size
         
-        # 패딩을 추가하여 정사각형(smaller_edge_size x smaller_edge_size)으로 만듭니다.
-        # 그러나 DINOv3는 패치 크기의 배수를 선호하므로, 먼저 패딩 크기를 계산합니다.
-        # 여기서는 ToTensor 이후에 처리하는 것이 더 정확합니다.
+        # 전경 마스크 필터링
+        MASK_FG_THRESHOLD = 0.5
+        patches_left_fg = mask1_quantized.view(-1) > MASK_FG_THRESHOLD
+        patches_right_fg = mask2_quantized.view(-1)[patch_indices_right] > MASK_FG_THRESHOLD
+        patches_fg_selection = patches_left_fg & patches_right_fg
         
-        image_tensor = self.transform(image_resized)
+        # 전경 포인트만 선택
+        locs_2d_left_fg = locs_2d_left[patches_fg_selection]
+        locs_2d_right_fg = locs_2d_right[patches_fg_selection]
         
-        # 패치 크기의 배수가 되도록 패딩 추가
-        c, h, w = image_tensor.shape
-        pad_w = (self.model.patch_size - w % self.model.patch_size) % self.model.patch_size
-        pad_h = (self.model.patch_size - h % self.model.patch_size) % self.model.patch_size
-
-        padded_tensor = torch.nn.functional.pad(image_tensor, (0, pad_w, 0, pad_h))
-
-        grid_size = (padded_tensor.shape[1] // self.model.patch_size, padded_tensor.shape[2] // self.model.patch_size)
+        if len(locs_2d_left_fg) == 0:
+            return [], []
         
-        # resize_scale은 원본 대비 최종 텐서의 비율을 나타내야 하지만,
-        # 패딩 때문에 복잡해지므로, 여기서는 원본 대비 리사이즈 비율을 사용합니다.
-        resize_scale = original_w / resized_w
-
-        return padded_tensor, grid_size, resize_scale
+        # Stratify points (공간적 분산)
+        indices_to_keep = self._stratify_points(
+            locs_2d_left_fg * scale1,
+            stratify_threshold ** 2
+        )
+        
+        # 최종 포인트 선택
+        sparse_points_left = locs_2d_left_fg[indices_to_keep] * scale1
+        sparse_points_right = locs_2d_right_fg[indices_to_keep] * scale2
+        
+        # (x, y) 형식으로 변환
+        coords1 = [(int(p[1]), int(p[0])) for p in sparse_points_left.numpy()]
+        coords2 = [(int(p[1]), int(p[0])) for p in sparse_points_right.numpy()]
+        
+        print(f"매칭 완료: 전경 패치 {len(locs_2d_left_fg)}개 중 {len(coords1)}개 선택")
+        
+        return coords1, coords2
     
-    def prepare_mask(self, mask_image_numpy: np.ndarray, grid_size: Tuple[int, int], _unused: float = 1.0) -> np.ndarray:
-        """
-        마스크를 이미지 전처리(종횡비 유지 + 우/하단 패딩)와 동일한 규칙으로 축소하여
-        주어진 DINOv3 그리드 크기(grid_size)에 맞춥니다.
-        """
-        # 1) 원본 마스크를 smaller_edge_size 기준으로 리사이즈
-        h, w = mask_image_numpy.shape[:2]
-        if h == 0 or w == 0:
-            return np.zeros((grid_size[0] * grid_size[1],), dtype=np.uint8)
-
-        scale = self.smaller_edge_size / min(w, h)
-        new_w = max(1, int(round(w * scale)))
-        new_h = max(1, int(round(h * scale)))
-        mask_resized = cv2.resize(mask_image_numpy.astype(np.uint8), (new_w, new_h), interpolation=cv2.INTER_NEAREST)
-
-        # 2) 패치 배수에 맞춰 우/하단 패딩 (prepare_image와 동일 규칙)
-        pad_w = (self.model.patch_size - new_w % self.model.patch_size) % self.model.patch_size
-        pad_h = (self.model.patch_size - new_h % self.model.patch_size) % self.model.patch_size
-        mask_padded = cv2.copyMakeBorder(mask_resized, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=0)
-
-        # 3) 그리드 크기로 다운샘플링
-        target_w, target_h = grid_size[1], grid_size[0]
-        mask_grid = cv2.resize(mask_padded, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
-        return mask_grid.flatten()
+    def _stratify_points(self, pts_2d: torch.Tensor, threshold: float) -> torch.Tensor:
+        """노트북의 stratify_points 함수와 동일한 구현"""
+        n = len(pts_2d)
+        if n == 0:
+            return torch.tensor([], dtype=torch.long)
+        
+        max_value = threshold + 1
+        
+        # L2 거리 계산
+        pts_2d_sq_norms = torch.linalg.vector_norm(pts_2d, dim=1)
+        pts_2d_sq_norms.square_()
+        
+        distances = self._compute_distances_l2(pts_2d, pts_2d, pts_2d_sq_norms, pts_2d_sq_norms)
+        distances.fill_diagonal_(max_value)
+        
+        # 거리 마스크
+        distances_mask = torch.empty((n, n), dtype=pts_2d.dtype, device=pts_2d.device)
+        torch.le(distances, threshold, out=distances_mask)
+        
+        ones_vec = torch.ones(n, device=pts_2d.device, dtype=pts_2d.dtype)
+        counts_vec = torch.mv(distances_mask, ones_vec)
+        
+        indices_mask = np.ones(n)
+        
+        # 노트북과 동일한 greedy 알고리즘
+        while torch.any(counts_vec).item():
+            index_max = torch.argmax(counts_vec).item()
+            indices_mask[index_max] = 0
+            distances[index_max, :] = max_value
+            distances[:, index_max] = max_value
+            torch.le(distances, threshold, out=distances_mask)
+            torch.mv(distances_mask, ones_vec, out=counts_vec)
+        
+        indices_to_keep = np.nonzero(indices_mask > 0)[0]
+        return torch.tensor(indices_to_keep, dtype=torch.long)
     
-    def extract_features(self, image_tensor: torch.Tensor) -> np.ndarray:
-        """
-        이미지 텐서에서 DINOv3 특징 추출
-        
-        Args:
-            image_tensor: 처리된 이미지 텐서
-            
-        Returns:
-            특징 배열 (numpy)
-        """
-        with torch.inference_mode():
-            if self.half_precision:
-                image_batch = image_tensor.unsqueeze(0).half().to(self.device)
-            else:
-                image_batch = image_tensor.unsqueeze(0).to(self.device)
-
-            # DINOv3는 get_intermediate_layers 대신 forward_features 사용
-            features = self.model.forward_features(image_batch)
-            # 패치 토큰만 추출 (CLS 토큰 제외)
-            if hasattr(features, 'x_norm_patchtokens'):
-                tokens = features.x_norm_patchtokens.squeeze()
-            else:
-                # 백업: 전체 특징에서 CLS 토큰 제외
-                if isinstance(features, dict) and 'x_norm_patchtokens' in features:
-                    tokens = features['x_norm_patchtokens'].squeeze()
-                elif isinstance(features, dict) and 'x_prenorm' in features:
-                    # CLS 토큰 제외하고 패치 토큰만 사용
-                    tokens = features['x_prenorm'][:, 1:].squeeze()
-                else:
-                    # 마지막 백업: features가 텐서인 경우
-                    if hasattr(features, 'shape') and len(features.shape) >= 2:
-                        tokens = features[:, 1:].squeeze()  # [0]은 CLS 토큰
-                    else:
-                        raise ValueError(f"Unexpected features format: {type(features)}")
-        return tokens.cpu().numpy()
-    
-    def idx_to_source_position(self, idx: int, grid_size: Tuple[int, int], resize_scale: float) -> Tuple[float, float]:
-        """
-        특징 인덱스를 원본 이미지의 위치로 변환
-        
-        Args:
-            idx: 특징 인덱스
-            grid_size: 그리드 크기
-            resize_scale: 크기 조정 비율
-            
-        Returns:
-            (row, col) 원본 이미지에서의 위치
-        """
-        row = (idx // grid_size[1])*self.model.patch_size*resize_scale + self.model.patch_size / 2
-        col = (idx % grid_size[1])*self.model.patch_size*resize_scale + self.model.patch_size / 2
-        return row, col
-    
-    def get_embedding_visualization(self, tokens: np.ndarray, grid_size: Tuple[int, int], 
-                                   resized_mask: Optional[np.ndarray] = None) -> np.ndarray:
-        """
-        특징 임베딩 시각화 생성
-        
-        Args:
-            tokens: 특징 토큰
-            grid_size: 그리드 크기
-            resized_mask: 선택적 마스크
-            
-        Returns:
-            시각화 이미지 (numpy 배열)
-        """
-        pca = PCA(n_components=3)
-        if resized_mask is not None:
-            tokens = tokens[resized_mask]
-        reduced_tokens = pca.fit_transform(tokens.astype(np.float32))
-        if resized_mask is not None:
-            tmp_tokens = np.zeros((*resized_mask.shape, 3), dtype=reduced_tokens.dtype)
-            tmp_tokens[resized_mask] = reduced_tokens
-            reduced_tokens = tmp_tokens
-        reduced_tokens = reduced_tokens.reshape((*grid_size, -1))
-        normalized_tokens = (reduced_tokens-np.min(reduced_tokens))/(np.max(reduced_tokens)-np.min(reduced_tokens))
-        return normalized_tokens
-    
-    def find_matches(self, features1: np.ndarray, features2: np.ndarray, k: int = 1) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        두 특징 집합 간의 일치 항목 찾기
-        
-        Args:
-            features1: 첫 번째 특징 집합
-            features2: 두 번째 특징 집합
-            k: 각 쿼리에 대해 찾을 이웃 수
-            
-        Returns:
-            (distances, matches) 튜플
-            - distances: 각 일치 항목의 거리
-            - matches: features1의 인덱스에 대응하는 features2의 인덱스
-        """
-        # 특징 차원 확인
-        d = features1.shape[1]
-        
-        # 입력 타입/정규화 (FAISS 전용)
-        features1 = features1.astype(np.float32)
-        features2 = features2.astype(np.float32)
-
-        index = faiss.IndexFlatL2(d)
-        faiss.normalize_L2(features1)
-        index.add(features1)
-        faiss.normalize_L2(features2)
-        distances, matches = index.search(features2, k)
-        
-        return distances, matches
-    
-    def match_images(self, image1: np.ndarray, image2: np.ndarray, 
-                    mask1: Optional[np.ndarray] = None, mask2: Optional[np.ndarray] = None,
-                    similarity_threshold: float = 0.7, max_matches: int = 50) -> Tuple[list, list, list]:
-        """
-        두 이미지 간의 스파스 매칭 수행
-        
-        Args:
-            image1: 첫 번째 이미지 (numpy 배열)
-            image2: 두 번째 이미지 (numpy 배열)
-            mask1: 첫 번째 이미지의 마스크 (선택사항)
-            mask2: 두 번째 이미지의 마스크 (선택사항)
-            similarity_threshold: 유사도 임계값
-            max_matches: 최대 매칭 수
-            
-        Returns:
-            (coords1, coords2, similarities) 튜플
-            - coords1: 첫 번째 이미지의 매칭 좌표
-            - coords2: 두 번째 이미지의 매칭 좌표
-            - similarities: 매칭 유사도
-        """
-        try:
-            # 이미지 전처리
-            tensor1, grid_size1, resize_scale1 = self.prepare_image(image1)
-            tensor2, grid_size2, resize_scale2 = self.prepare_image(image2)
-            
-            # 특징 추출
-            features1 = self.extract_features(tensor1)
-            features2 = self.extract_features(tensor2)
-            
-            # 마스크 처리 (선택사항)
-            if mask1 is not None:
-                mask1_resized = self.prepare_mask(mask1, grid_size1, resize_scale1)
-                features1 = features1[mask1_resized > 0]
-                valid_indices1 = np.where(mask1_resized > 0)[0]
-            else:
-                valid_indices1 = np.arange(len(features1))
-            
-            if mask2 is not None:
-                mask2_resized = self.prepare_mask(mask2, grid_size2, resize_scale2)
-                features2 = features2[mask2_resized > 0]
-                valid_indices2 = np.where(mask2_resized > 0)[0]
-            else:
-                valid_indices2 = np.arange(len(features2))
-            
-            if len(features1) == 0 or len(features2) == 0:
-                print("특징이 없어 매칭을 수행할 수 없습니다.")
-                return [], [], []
-            
-            # 특징 정규화
-            features1_norm = features1 / np.linalg.norm(features1, axis=1, keepdims=True)
-            features2_norm = features2 / np.linalg.norm(features2, axis=1, keepdims=True)
-            
-            # 코사인 유사도 계산
-            similarities_matrix = np.dot(features1_norm, features2_norm.T)
-            
-            # 최적 매칭 찾기
-            coords1 = []
-            coords2 = []
-            similarities = []
-            
-            for i in range(len(features1)):
-                best_match_idx = np.argmax(similarities_matrix[i])
-                best_similarity = similarities_matrix[i][best_match_idx]
-                
-                if best_similarity >= similarity_threshold:
-                    # 좌표 변환
-                    idx1 = valid_indices1[i]
-                    idx2 = valid_indices2[best_match_idx]
-                    
-                    row1, col1 = self.idx_to_source_position(idx1, grid_size1, resize_scale1)
-                    row2, col2 = self.idx_to_source_position(idx2, grid_size2, resize_scale2)
-                    
-                    coords1.append((int(col1), int(row1)))
-                    coords2.append((int(col2), int(row2)))
-                    similarities.append(best_similarity)
-            
-            # 유사도 순으로 정렬
-            if coords1:
-                sorted_indices = np.argsort(similarities)[::-1]
-                coords1 = [coords1[i] for i in sorted_indices[:max_matches]]
-                coords2 = [coords2[i] for i in sorted_indices[:max_matches]]
-                similarities = [similarities[i] for i in sorted_indices[:max_matches]]
-            
-            print(f"매칭 완료: {len(coords1)}개의 매칭 포인트 발견")
-            return coords1, coords2, similarities
-            
-        except Exception as e:
-            print(f"이미지 매칭 중 오류: {e}")
-            import traceback
-            traceback.print_exc()
-            return [], [], []
+    @staticmethod
+    def _compute_distances_l2(X, Y, X_squared_norm, Y_squared_norm):
+        """L2 거리 계산"""
+        distances = -2 * X @ Y.T
+        distances.add_(X_squared_norm[:, None]).add_(Y_squared_norm[None, :])
+        return distances

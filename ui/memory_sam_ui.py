@@ -182,6 +182,10 @@ class MemorySAMUI:
         file_paths = [f.name for f in files] if isinstance(files, list) else [files.name]
         all_results_data = []
         gallery_images = []
+        # 결과 저장용 메인 폴더 생성 (단일/다중 파일 처리 공통)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        main_result_dir = Path(self.results_dir) / f"images_{timestamp}"
+        main_result_dir.mkdir(exist_ok=True, parents=True)
 
         progress(0, desc="이미지 처리 시작...")
         for i, file_path in enumerate(file_paths):
@@ -198,6 +202,13 @@ class MemorySAMUI:
             if "error" in results:
                 gr.Warning(f"{os.path.basename(file_path)} 처리 실패: {results['error']}")
                 continue
+
+            # 개별 결과 저장
+            try:
+                self._save_individual_results(results, main_result_dir, i)
+                print(f"[DEBUG] {os.path.basename(file_path)} 결과 저장 완료 -> {main_result_dir}")
+            except Exception as e:
+                print(f"[ERROR] {os.path.basename(file_path)} 결과 저장 실패: {e}")
             all_results_data.append(results)
             gallery_images.append(results.get("visualization"))
 
@@ -219,11 +230,15 @@ class MemorySAMUI:
         else:
             sparse_info = "\n❌ 스파스 매칭 시각화 생성 실패"
         
-        result_info_text = f"총 {len(all_results_data)}개 처리됨. 첫 결과 표시.{sparse_info}"
+        result_info_text = f"총 {len(all_results_data)}개 처리됨. 결과 저장 위치: {main_result_dir.name}/{sparse_info}"
         
+        # Convert boolean mask to displayable uint8
+        mask_disp = None
+        if first_res.get("mask") is not None:
+            mask_disp = (first_res.get("mask").astype(np.uint8)) * 255
         return (
             gallery_images, first_res.get("visualization"), first_res.get("image"), 
-            first_res.get("mask"), result_info_text,
+            mask_disp, result_info_text,
             ref_gallery, first_res.get("sparse_match_visualization"),
             first_res.get("img1_points"), first_res.get("img2_points"), all_results_data 
         )
@@ -270,7 +285,7 @@ class MemorySAMUI:
         image_files = []
         
         try:
-            for file in os.listdir(folder_path):
+            for file in sorted(os.listdir(folder_path)):
                 if any(file.lower().endswith(ext) for ext in image_extensions):
                     image_files.append(os.path.join(folder_path, file))
         except Exception as e:
@@ -346,9 +361,12 @@ class MemorySAMUI:
         
         result_info_text = f"폴더 '{folder_name}'에서 {len(all_results_data)}개 처리됨. 결과 저장 위치: {folder_name}_{timestamp}/{sparse_info}"
         
+        mask_disp = None
+        if first_res.get("mask") is not None:
+            mask_disp = (first_res.get("mask").astype(np.uint8)) * 255
         return (
             gallery_images, first_res.get("visualization"), first_res.get("image"), 
-            first_res.get("mask"), result_info_text,
+            mask_disp, result_info_text,
             ref_gallery, first_res.get("sparse_match_visualization"),
             first_res.get("img1_points"), first_res.get("img2_points"), all_results_data 
         )
@@ -409,10 +427,11 @@ class MemorySAMUI:
                 print(f"[DEBUG] 이미지2 특징점 저장: {image_result_dir}/img2_points.png")
             
             # 6. 메타데이터 저장
+            from datetime import datetime
             metadata = {
                 "image_path": results.get("image_path"),
                 "score": results.get("score"),
-                "timestamp": timestamp,
+                "timestamp": datetime.now().isoformat(),
                 "index": index
             }
             
@@ -477,7 +496,11 @@ class MemorySAMUI:
         if "gallery_items" in item_data and item_data["gallery_items"]:
             for item in item_data["gallery_items"]:
                 caption = f"ID: {item['id']}\nSim: {item['similarity']:.4f}"
-                top5_gallery.append((item['image'], caption))
+                # Prefer lightweight path-based gallery items to reduce memory usage
+                if 'image_path' in item:
+                    top5_gallery.append((item['image_path'], caption))
+                elif 'image' in item:
+                    top5_gallery.append((item['image'], caption))
             info = f"Path: {item_data.get('image_path')}"
         return top5_gallery, info
 
@@ -502,9 +525,12 @@ class MemorySAMUI:
         if "score" in selected_item:
             selected_info += f"\n🎯 세그멘테이션 점수: {selected_item['score']:.4f}"
         
+        mask_disp = None
+        if selected_item.get("mask") is not None:
+            mask_disp = (selected_item.get("mask").astype(np.uint8)) * 255
         return (
             selected_item.get("visualization"), selected_item.get("image"), 
-            selected_item.get("mask"), selected_info, top5_gallery,
+            mask_disp, selected_info, top5_gallery,
             selected_item.get("sparse_match_visualization"),
             selected_item.get("img1_points"), selected_item.get("img2_points")
         )
@@ -589,10 +615,38 @@ class MemorySAMUI:
             point_labels=labels_tensor,
             multimask_output=True,
         )
-        
-        scores_for_image = scores[0] if scores.ndim > 1 else scores
-        scores_tensor = torch.from_numpy(np.atleast_1d(scores_for_image)).to(self.memory_sam.device)
-        mask = masks[0, torch.argmax(scores_tensor)].cpu().numpy()
+
+        # Select best mask robustly for numpy/torch outputs
+        best_idx = 0
+        try:
+            if isinstance(scores, np.ndarray):
+                scores_for_image = scores[0] if scores.ndim > 1 else scores
+                best_idx = int(np.argmax(np.atleast_1d(scores_for_image)))
+            else:
+                # torch tensor
+                scores_for_image = scores[0] if scores.dim() > 1 else scores
+                best_idx = int(torch.argmax(scores_for_image).item())
+        except Exception:
+            best_idx = 0
+
+        # Extract the corresponding mask
+        if isinstance(masks, np.ndarray):
+            if masks.ndim == 4:
+                best_mask = masks[0, best_idx]
+            elif masks.ndim == 3:
+                best_mask = masks[best_idx]
+            else:
+                best_mask = masks
+            mask = (best_mask.astype(np.uint8) > 0)
+        else:
+            # torch tensor
+            if masks.ndim == 4:
+                best_mask_t = masks[0, best_idx]
+            elif masks.ndim == 3:
+                best_mask_t = masks[best_idx]
+            else:
+                best_mask_t = masks
+            mask = best_mask_t.detach().cpu().numpy().astype(np.uint8) > 0
         
         result_img = draw_points_on_image(image, points, labels, mask)
         

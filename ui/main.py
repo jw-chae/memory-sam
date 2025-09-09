@@ -49,7 +49,7 @@ def parse_args():
     parser.add_argument(
         "--results_dir", 
         type=str, 
-        default="results",
+        default="/home/joongwon00/memory-sam/results",
         help="Results directory"
     )
     
