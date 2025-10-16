@@ -68,11 +68,17 @@ class MemorySAMPredictor:
                 dinov3_model: str = "dinov3_vitl16",
                 memory_dir: str = "memory",
                 results_dir: str = "results",
-                device: str = "cuda"):
+                device: str = "cuda",
+                process_at_dinov3_size: bool = True):
         
         self.device = self._get_device(device)
         self.results_dir = Path(results_dir)
         self.results_dir.mkdir(exist_ok=True, parents=True)
+        
+        # Performance optimization: process at DINOv3 size
+        self.process_at_dinov3_size = process_at_dinov3_size
+        self.dinov3_image_size = 768
+        self.dinov3_patch_size = 16
         
         # UI-configurable settings
         self.use_kmeans_fg = True
@@ -100,6 +106,36 @@ class MemorySAMPredictor:
         
         print(f"Using device: {final_device}")
         return final_device
+    
+    def resize_to_dinov3_size(self, image: np.ndarray) -> np.ndarray:
+        """
+        DINOv3와 동일한 크기로 리사이즈 (종횡비 유지)
+        작은 이미지는 업스케일하지 않음
+        
+        Args:
+            image: 입력 이미지 (H, W, 3)
+            
+        Returns:
+            리사이즈된 이미지
+        """
+        h, w = image.shape[:2]
+        
+        # DINOv3 리사이즈 로직
+        h_patches = int(self.dinov3_image_size / self.dinov3_patch_size)
+        w_patches = int((w * self.dinov3_image_size) / (h * self.dinov3_patch_size))
+        target_h = h_patches * self.dinov3_patch_size
+        target_w = w_patches * self.dinov3_patch_size
+        
+        # 이미지가 이미 작으면 리사이즈하지 않음 (업스케일 방지)
+        if target_w * target_h >= w * h:
+            print(f"[RESIZE] {w}x{h} - 이미 충분히 작음, 리사이즈 건너뜀")
+            return image
+        
+        resized = cv2.resize(image, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+        
+        print(f"[RESIZE] {w}x{h} -> {target_w}x{target_h} (DINOv3 size, {target_w*target_h/(w*h)*100:.1f}% of original)")
+        
+        return resized
         
     def _load_sam_model(self, model_type, checkpoint_path):
         if checkpoint_path is None:
@@ -162,6 +198,10 @@ class MemorySAMPredictor:
         print("="*50)
 
         image = np.array(Image.open(image_path).convert("RGB"))
+        
+        # Resize to DINOv3 size for performance optimization
+        if self.process_at_dinov3_size:
+            image = self.resize_to_dinov3_size(image)
         
         # 1. Feature Extraction
         print("\n[Step 1] Extracting patch features from input image...")

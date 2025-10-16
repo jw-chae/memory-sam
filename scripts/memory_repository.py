@@ -47,7 +47,9 @@ class MemoryRepository:
         Image.fromarray(mask).save(str(path))
         return str(path.relative_to(self.memory_dir))
 
-    def save_features(self, item_dir: Path, features: np.ndarray) -> str:
+    def save_features(self, item_dir: Path, features: Optional[np.ndarray]) -> Optional[str]:
+        if features is None:
+            return None
         path = item_dir / "features.npy"
         np.save(str(path), features)
         return str(path.relative_to(self.memory_dir))
@@ -68,18 +70,28 @@ class MemoryRepository:
     def load_item_files(self, item: Dict) -> Dict:
         image = np.array(Image.open(str(self.memory_dir / item["image_path"])))
         mask = np.array(Image.open(str(self.memory_dir / item["mask_path"])))
-        features = np.load(str(self.memory_dir / item["features_path"]))
-        result = {"image": image, "mask": mask, "features": features}
+        result = {"image": image, "mask": mask}
+        
+        # Load features if available
+        if "features_path" in item:
+            try:
+                features = np.load(str(self.memory_dir / item["features_path"]), allow_pickle=True)
+                result["features"] = features
+            except Exception as e:
+                print(f"Warning: Failed to load features: {e}")
         if "patch_features_path" in item:
             pf = self.memory_dir / item["patch_features_path"]
             if os.path.exists(pf):
-                result["patch_features"] = np.load(str(pf))
-                info = self.memory_dir / Path(item["patch_features_path"]).parent / "patch_info.json"
-                if info.exists():
-                    with open(info, "r") as f:
-                        meta = json.load(f)
-                    result["grid_size"] = tuple(meta["grid_size"])  # type: ignore
-                    result["resize_scale"] = meta["resize_scale"]
+                try:
+                    result["patch_features"] = np.load(str(pf), allow_pickle=True)
+                    info = self.memory_dir / Path(item["patch_features_path"]).parent / "patch_info.json"
+                    if info.exists():
+                        with open(info, "r") as f:
+                            meta = json.load(f)
+                        result["grid_size"] = tuple(meta["grid_size"])  # type: ignore
+                        result["resize_scale"] = meta["resize_scale"]
+                except Exception as e:
+                    print(f"Warning: Failed to load patch features: {e}")
         return result
 
 

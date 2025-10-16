@@ -65,6 +65,20 @@ def parse_args():
         help="Gradio 인터페이스를 공개 URL로 공유"
     )
     
+    parser.add_argument(
+        "--process_at_dinov3_size",
+        action="store_true",
+        default=True,
+        help="DINOv3 크기(1024x768)로 처리하여 속도 향상 (기본: True)"
+    )
+    
+    parser.add_argument(
+        "--no_process_at_dinov3_size",
+        dest="process_at_dinov3_size",
+        action="store_false",
+        help="원본 크기로 처리 (느림, 디스크 많이 사용)"
+    )
+    
     return parser.parse_args()
 
 def main():
@@ -93,6 +107,7 @@ def main():
         memory_dir=memory_dir,
         results_dir=results_dir,
         device=args.device,
+        process_at_dinov3_size=args.process_at_dinov3_size,
     )
     
     # Gradio 인터페이스 설정 및 실행

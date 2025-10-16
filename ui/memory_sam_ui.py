@@ -10,6 +10,7 @@ from datetime import datetime
 import time
 from tqdm import tqdm
 import cv2
+from PIL import Image
 
 # 현재 디렉토리 경로를 Python 경로에 추가
 script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -35,7 +36,8 @@ class MemorySAMUI:
                 dinov3_model: str = "dinov3_vitb16",
                 memory_dir: str = "memory", 
                 results_dir: str = "results",
-                device: str = "cuda"):
+                device: str = "cuda",
+                process_at_dinov3_size: bool = True):
         """
         Initialize Memory SAM UI
         """
@@ -46,7 +48,8 @@ class MemorySAMUI:
             dinov3_model=dinov3_model,
             memory_dir=memory_dir,
             results_dir=results_dir,
-            device=device
+            device=device,
+            process_at_dinov3_size=process_at_dinov3_size
         )
         
         # Initialize sparse match visualizer
@@ -209,38 +212,61 @@ class MemorySAMUI:
                 print(f"[DEBUG] {os.path.basename(file_path)} 결과 저장 완료 -> {main_result_dir}")
             except Exception as e:
                 print(f"[ERROR] {os.path.basename(file_path)} 결과 저장 실패: {e}")
-            all_results_data.append(results)
+            
+            # 메모리 절약: 필수 정보만 저장 (거대한 numpy 배열 제외)
+            compact_result = {
+                "image_path": results.get("image_path"),
+                "score": results.get("score"),
+                "visualization": results.get("visualization"),  # UI 표시용으로만 사용
+            }
+            all_results_data.append(compact_result)
             gallery_images.append(results.get("visualization"))
+            
+            # 메모리 해제: results에서 큰 데이터 제거
+            del results
 
         if not all_results_data:
             gr.Info("모든 이미지 처리에 실패했습니다.")
             return [None] * 9 + [[]]
 
+        # 첫 번째 이미지 결과만 UI에 표시 (메모리 절약)
         first_res = all_results_data[0]
-        ref_gallery, _ = self._get_top5_gallery_data(first_res)
-
-        # 결과 정보에 스파스 매칭 정보 추가
-        sparse_info = ""
-        if first_res.get("sparse_match_visualization") is not None:
-            sparse_info = f"\n✅ 스파스 매칭 시각화 생성됨"
-            if first_res.get("img1_points") is not None:
-                sparse_info += f"\n✅ 메모리 이미지 특징점 분석 완료"
-            if first_res.get("img2_points") is not None:
-                sparse_info += f"\n✅ 현재 이미지 특징점 분석 완료"
-        else:
-            sparse_info = "\n❌ 스파스 매칭 시각화 생성 실패"
         
-        result_info_text = f"총 {len(all_results_data)}개 처리됨. 결과 저장 위치: {main_result_dir.name}/{sparse_info}"
+        result_info_text = f"총 {len(all_results_data)}개 처리됨. 결과 저장 위치: {main_result_dir.name}"
         
-        # Convert boolean mask to displayable uint8
-        mask_disp = None
-        if first_res.get("mask") is not None:
-            mask_disp = (first_res.get("mask").astype(np.uint8)) * 255
+        # 첫 번째 이미지의 상세 결과를 다시 로드하여 표시 (저장된 파일에서)
+        first_image_path = all_results_data[0]["image_path"]
+        image_stem = os.path.splitext(os.path.basename(first_image_path))[0]
+        first_result_dir = main_result_dir / image_stem
+        
+        # 저장된 파일들을 로드
+        from PIL import Image as PILImage
+        first_image = None
+        first_mask = None
+        sparse_vis = None
+        img1_points_img = None
+        img2_points_img = None
+        
+        try:
+            if (first_result_dir / "input.png").exists():
+                first_image = np.array(PILImage.open(first_result_dir / "input.png"))
+            if (first_result_dir / "mask.png").exists():
+                first_mask = np.array(PILImage.open(first_result_dir / "mask.png"))
+            if (first_result_dir / "sparse_matches.png").exists():
+                sparse_vis = np.array(PILImage.open(first_result_dir / "sparse_matches.png"))
+                result_info_text += "\n✅ 스파스 매칭 시각화 생성됨"
+            if (first_result_dir / "img1_points.png").exists():
+                img1_points_img = np.array(PILImage.open(first_result_dir / "img1_points.png"))
+            if (first_result_dir / "img2_points.png").exists():
+                img2_points_img = np.array(PILImage.open(first_result_dir / "img2_points.png"))
+        except Exception as e:
+            print(f"[WARNING] 저장된 결과 로드 실패: {e}")
+        
         return (
-            gallery_images, first_res.get("visualization"), first_res.get("image"), 
-            mask_disp, result_info_text,
-            ref_gallery, first_res.get("sparse_match_visualization"),
-            first_res.get("img1_points"), first_res.get("img2_points"), all_results_data 
+            gallery_images, first_res.get("visualization"), first_image, 
+            first_mask, result_info_text,
+            [], sparse_vis,  # ref_gallery는 비워둠 (메모리 절약)
+            img1_points_img, img2_points_img, all_results_data 
         )
     
     def browse_folder(self):
@@ -338,37 +364,60 @@ class MemorySAMUI:
             except Exception as e:
                 print(f"[ERROR] {os.path.basename(file_path)} 결과 저장 실패: {e}")
             
-            all_results_data.append(results)
+            # 메모리 절약: 필수 정보만 저장 (거대한 numpy 배열 제외)
+            compact_result = {
+                "image_path": results.get("image_path"),
+                "score": results.get("score"),
+                "visualization": results.get("visualization"),  # UI 표시용으로만 사용
+            }
+            all_results_data.append(compact_result)
             gallery_images.append(results.get("visualization"))
+            
+            # 메모리 해제: results에서 큰 데이터 제거
+            del results
 
         if not all_results_data:
             gr.Info("모든 이미지 처리에 실패했습니다.")
             return [None] * 9 + [[]]
 
+        # 첫 번째 이미지 결과만 UI에 표시 (메모리 절약)
         first_res = all_results_data[0]
-        ref_gallery, _ = self._get_top5_gallery_data(first_res)
-
-        # 결과 정보에 폴더 처리 정보 추가
-        sparse_info = ""
-        if first_res.get("sparse_match_visualization") is not None:
-            sparse_info = f"\n✅ 스파스 매칭 시각화 생성됨"
-            if first_res.get("img1_points") is not None:
-                sparse_info += f"\n✅ 메모리 이미지 특징점 분석 완료"
-            if first_res.get("img2_points") is not None:
-                sparse_info += f"\n✅ 현재 이미지 특징점 분석 완료"
-        else:
-            sparse_info = "\n❌ 스파스 매칭 시각화 생성 실패"
         
-        result_info_text = f"폴더 '{folder_name}'에서 {len(all_results_data)}개 처리됨. 결과 저장 위치: {folder_name}_{timestamp}/{sparse_info}"
+        result_info_text = f"폴더 '{folder_name}'에서 {len(all_results_data)}개 처리됨. 결과 저장 위치: {folder_name}_{timestamp}"
         
-        mask_disp = None
-        if first_res.get("mask") is not None:
-            mask_disp = (first_res.get("mask").astype(np.uint8)) * 255
+        # 첫 번째 이미지의 상세 결과를 다시 로드하여 표시 (저장된 파일에서)
+        first_image_path = all_results_data[0]["image_path"]
+        image_stem = os.path.splitext(os.path.basename(first_image_path))[0]
+        first_result_dir = main_result_dir / image_stem
+        
+        # 저장된 파일들을 로드
+        from PIL import Image as PILImage
+        first_image = None
+        first_mask = None
+        sparse_vis = None
+        img1_points_img = None
+        img2_points_img = None
+        
+        try:
+            if (first_result_dir / "input.png").exists():
+                first_image = np.array(PILImage.open(first_result_dir / "input.png"))
+            if (first_result_dir / "mask.png").exists():
+                first_mask = np.array(PILImage.open(first_result_dir / "mask.png"))
+            if (first_result_dir / "sparse_matches.png").exists():
+                sparse_vis = np.array(PILImage.open(first_result_dir / "sparse_matches.png"))
+                result_info_text += "\n✅ 스파스 매칭 시각화 생성됨"
+            if (first_result_dir / "img1_points.png").exists():
+                img1_points_img = np.array(PILImage.open(first_result_dir / "img1_points.png"))
+            if (first_result_dir / "img2_points.png").exists():
+                img2_points_img = np.array(PILImage.open(first_result_dir / "img2_points.png"))
+        except Exception as e:
+            print(f"[WARNING] 저장된 결과 로드 실패: {e}")
+        
         return (
-            gallery_images, first_res.get("visualization"), first_res.get("image"), 
-            mask_disp, result_info_text,
-            ref_gallery, first_res.get("sparse_match_visualization"),
-            first_res.get("img1_points"), first_res.get("img2_points"), all_results_data 
+            gallery_images, first_res.get("visualization"), first_image, 
+            first_mask, result_info_text,
+            [], sparse_vis,  # ref_gallery는 비워둠 (메모리 절약)
+            img1_points_img, img2_points_img, all_results_data 
         )
     
     def _save_individual_results(self, results, main_result_dir, index):
@@ -506,33 +555,55 @@ class MemorySAMUI:
 
     def handle_result_gallery_select(self, processed_data, evt: gr.SelectData):
         selected_item = processed_data[evt.index]
-        top5_gallery, info = self._get_top5_gallery_data(selected_item)
         
         # 선택된 결과에 대한 상세 정보 생성
         selected_info = f"선택된 결과: {os.path.basename(selected_item.get('image_path', 'Unknown'))}"
-        
-        # 스파스 매칭 정보 추가
-        if selected_item.get("sparse_match_visualization") is not None:
-            selected_info += f"\n✅ 스파스 매칭 시각화 있음"
-            if selected_item.get("img1_points") is not None:
-                selected_info += f"\n✅ 메모리 이미지 특징점 분석 완료"
-            if selected_item.get("img2_points") is not None:
-                selected_info += f"\n✅ 현재 이미지 특징점 분석 완료"
-        else:
-            selected_info += f"\n❌ 스파스 매칭 시각화 없음"
         
         # 세그멘테이션 점수 정보 추가
         if "score" in selected_item:
             selected_info += f"\n🎯 세그멘테이션 점수: {selected_item['score']:.4f}"
         
-        mask_disp = None
-        if selected_item.get("mask") is not None:
-            mask_disp = (selected_item.get("mask").astype(np.uint8)) * 255
+        # 저장된 파일에서 상세 결과 로드 (메모리 절약)
+        image_path = selected_item.get("image_path")
+        if not image_path:
+            return (selected_item.get("visualization"), None, None, selected_info, [], None, None, None)
+        
+        # 결과 디렉토리 찾기
+        from PIL import Image as PILImage
+        image_stem = os.path.splitext(os.path.basename(image_path))[0]
+        
+        # 상위 results 폴더에서 찾기
+        result_image = None
+        result_mask = None
+        sparse_vis = None
+        img1_points_img = None
+        img2_points_img = None
+        
+        try:
+            # results 폴더 탐색
+            for result_folder in Path(self.results_dir).iterdir():
+                if result_folder.is_dir():
+                    result_dir = result_folder / image_stem
+                    if result_dir.exists():
+                        if (result_dir / "input.png").exists():
+                            result_image = np.array(PILImage.open(result_dir / "input.png"))
+                        if (result_dir / "mask.png").exists():
+                            result_mask = np.array(PILImage.open(result_dir / "mask.png"))
+                        if (result_dir / "sparse_matches.png").exists():
+                            sparse_vis = np.array(PILImage.open(result_dir / "sparse_matches.png"))
+                            selected_info += "\n✅ 스파스 매칭 시각화 있음"
+                        if (result_dir / "img1_points.png").exists():
+                            img1_points_img = np.array(PILImage.open(result_dir / "img1_points.png"))
+                        if (result_dir / "img2_points.png").exists():
+                            img2_points_img = np.array(PILImage.open(result_dir / "img2_points.png"))
+                        break
+        except Exception as e:
+            print(f"[WARNING] 저장된 결과 로드 실패: {e}")
+        
         return (
-            selected_item.get("visualization"), selected_item.get("image"), 
-            mask_disp, selected_info, top5_gallery,
-            selected_item.get("sparse_match_visualization"),
-            selected_item.get("img1_points"), selected_item.get("img2_points")
+            selected_item.get("visualization"), result_image, 
+            result_mask, selected_info, [],  # top5_gallery는 비워둠 (메모리 절약)
+            sparse_vis, img1_points_img, img2_points_img
         )
     
     def _setup_mask_generator_tab(self):
@@ -657,19 +728,25 @@ class MemorySAMUI:
             return "저장할 이미지나 마스크가 없습니다."
 
         try:
-            # 1. Extract features
-            patch_features, _, _ = self.memory_sam.feature_extractor.extract_patch_features(image)
+            # 1. Extract features (patch features with grid_size and resize_scale)
+            patch_features, grid_size, resize_scale = self.memory_sam.feature_extractor.extract_patch_features(image)
+            print(f"[DEBUG] 메모리 저장 - patch_features shape: {patch_features.shape}")
+            print(f"[DEBUG] 메모리 저장 - grid_size: {grid_size}")
+            print(f"[DEBUG] 메모리 저장 - resize_scale: {resize_scale}")
             
-            # 2. Add to memory
+            # 2. Add to memory with grid_size and resize_scale for sparse matching visualization
             memory_id = self.memory_sam.memory.add_memory(
                 image=image,
                 mask=mask,
                 features=None, # Global features are not needed for sparse matching memory
                 patch_features=patch_features,
+                grid_size=grid_size,
+                resize_scale=resize_scale,
             )
             
             success_msg = f"성공적으로 메모리에 저장되었습니다. (ID: {memory_id})"
             print(success_msg)
+            print(f"[DEBUG] 메모리 저장 완료 - patch_info.json이 생성되었는지 확인하세요")
             return success_msg
         except Exception as e:
             error_msg = f"메모리 저장 중 오류 발생: {e}"
@@ -685,7 +762,9 @@ class MemorySAMUI:
                 with gr.Column(scale=1):
                     memory_display = gr.Gallery(label="메모리 항목", columns=4, rows=2, height=400)
                     memory_stats = gr.Textbox(label="메모리 통계", interactive=False)
-                    refresh_memory_btn = gr.Button(value="메모리 새로고침")
+                    with gr.Row():
+                        refresh_memory_btn = gr.Button(value="메모리 새로고침", variant="secondary")
+                        delete_all_btn = gr.Button("⚠️ 전체 삭제", variant="stop")
                 
                 with gr.Column(scale=1):
                     selected_memory_image = gr.Image(label="선택된 메모리 항목")
@@ -700,22 +779,66 @@ class MemorySAMUI:
                 for meta in item_metas:
                     try:
                         item_id = meta['id']
-                        # For gallery, we only need the thumbnail, not all data.
-                        # This assumes MemoryRepository has a way to get the image directly.
+                        # Load image directly to avoid Gradio cache issues
                         image_path = self.memory_sam.memory.repo.memory_dir / meta['image_path']
-                        gallery.append((str(image_path), f"ID: {item_id}"))
+                        pil_image = Image.open(str(image_path))
+                        # Convert to RGB if needed
+                        if pil_image.mode != 'RGB':
+                            pil_image = pil_image.convert('RGB')
+                        image = np.array(pil_image)
+                        gallery.append((image, f"ID: {item_id}"))
                     except Exception as e:
                         print(f"Error loading memory item {meta.get('id', 'N/A')} for gallery: {e}")
+                        import traceback
+                        traceback.print_exc()
                 stats = f"총 {len(item_metas)}개의 항목이 메모리에 저장되어 있습니다."
                 return gallery, stats
 
             def display_memory_item(evt: gr.SelectData):
-                caption = evt.value
-                item_id_str = caption.split(': ')[1]
-                item_id = int(item_id_str)
-                item_data = self.memory_sam.memory.load_item_data(item_id)
-                # We show the full image here, and metadata.
-                return item_data.get('image'), item_data, item_id
+                # evt.index contains the index of the selected item in the gallery
+                # evt.value can be a dict or caption string depending on Gradio version
+                try:
+                    # Try to get from processed_images list using index
+                    item_metas = self.memory_sam.memory.get_all_items()
+                    if evt.index < len(item_metas):
+                        item_id = item_metas[evt.index]["id"]
+                    else:
+                        # Fallback: try to parse from caption
+                        if isinstance(evt.value, dict):
+                            caption = evt.value.get('caption', '')
+                        else:
+                            caption = evt.value
+                        item_id_str = caption.split(': ')[1]
+                        item_id = int(item_id_str)
+                    
+                    # Load full item data
+                    item_data = self.memory_sam.memory.load_item_data(item_id)
+                    
+                    # Prepare metadata for JSON display (exclude numpy arrays)
+                    metadata = {
+                        "id": item_id,
+                        "created_at": item_data["item"].get("created_at"),
+                        "image_path": item_data["item"].get("image_path"),
+                        "mask_path": item_data["item"].get("mask_path"),
+                        "has_features": "features" in item_data,
+                        "has_patch_features": "patch_features" in item_data,
+                        "has_grid_size": "grid_size" in item_data,
+                    }
+                    
+                    # Add shape information if available
+                    if "patch_features" in item_data:
+                        metadata["patch_features_shape"] = str(item_data["patch_features"].shape)
+                    if "grid_size" in item_data:
+                        metadata["grid_size"] = item_data["grid_size"]
+                    if "resize_scale" in item_data:
+                        metadata["resize_scale"] = item_data["resize_scale"]
+                    
+                    return item_data.get('image'), metadata, item_id
+                except Exception as e:
+                    print(f"Error displaying memory item: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    return None, {}, None
 
             def delete_memory_item(item_id):
                 if item_id is None:
@@ -729,8 +852,33 @@ class MemorySAMUI:
                     error_msg = f"항목 삭제 중 오류 발생: {e}"
                     print(error_msg)
                     return error_msg
+            
+            def delete_all_memory():
+                try:
+                    count = len(self.memory_sam.memory.get_all_items())
+                    if count == 0:
+                        return "삭제할 메모리 항목이 없습니다."
+                    self.memory_sam.memory.delete_all_memory()
+                    success_msg = f"총 {count}개의 메모리 항목이 모두 삭제되었습니다."
+                    print(success_msg)
+                    gr.Info(success_msg)
+                    return success_msg
+                except Exception as e:
+                    error_msg = f"메모리 전체 삭제 중 오류 발생: {e}"
+                    print(error_msg)
+                    import traceback
+                    traceback.print_exc()
+                    return error_msg
 
             refresh_memory_btn.click(
+                fn=load_memory_display,
+                outputs=[memory_display, memory_stats]
+            )
+            
+            delete_all_btn.click(
+                fn=delete_all_memory,
+                outputs=[item_delete_result]
+            ).then(
                 fn=load_memory_display,
                 outputs=[memory_display, memory_stats]
             )

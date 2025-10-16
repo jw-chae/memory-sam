@@ -37,3 +37,10 @@ results_5pos/
 results_sota/
 results/
 results_original/
+
+# DINOv3 submodule (managed separately)
+dinov3/
+
+# Memory data (runtime generated)
+memory/*.npy
+memory/item_*/

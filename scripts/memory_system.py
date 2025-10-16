@@ -32,6 +32,9 @@ class MemorySystem:
         self.faiss_index = None
         self.id_to_index_map = {}  # Map memory ID to FAISS index
         
+        # Clean up orphaned index entries
+        self.validate_and_clean_index()
+        
         # Build FAISS index from existing items
         self._build_faiss_index()
     
@@ -42,9 +45,11 @@ class MemorySystem:
         
         # Determine feature dimension from first item
         first_item = self.index["items"][0]
+        if "features_path" not in first_item:
+            return  # No features available
         first_features_path = self.memory_dir / first_item["features_path"]
         if first_features_path.exists():
-            first_features = np.load(str(first_features_path))
+            first_features = np.load(str(first_features_path), allow_pickle=True)
             self.feature_dim = first_features.shape[0]
             
             # Create FAISS index
@@ -53,8 +58,16 @@ class MemorySystem:
             # Add all items
             for idx, item in enumerate(self.index["items"]):
                 try:
+                    if "features_path" not in item:
+                        continue  # Skip items without features
                     features_path = self.memory_dir / item["features_path"]
-                    features = np.load(str(features_path))
+                    
+                    # Check if file exists before loading
+                    if not features_path.exists():
+                        print(f"Warning: Features file not found for item ID {item['id']}, skipping")
+                        continue
+                    
+                    features = np.load(str(features_path), allow_pickle=True)
                     features = self._normalize_features(features)
                     
                     # L2 normalization (important for FAISS search)
@@ -106,7 +119,7 @@ class MemorySystem:
         item_dir = self.repo.create_item_dir(memory_id)
         image_rel = self.repo.save_image(item_dir, image)
         mask_rel = self.repo.save_mask(item_dir, mask)
-        features_rel = self.repo.save_features(item_dir, features)
+        features_rel = self.repo.save_features(item_dir, features)  # Can be None
         patch_features_rel = self.repo.save_patch_features(item_dir, patch_features, grid_size, resize_scale)
         
         # 메타데이터 저장 (있는 경우)
@@ -122,9 +135,12 @@ class MemorySystem:
             "id": memory_id,
             "image_path": image_rel,
             "mask_path": mask_rel,
-            "features_path": features_rel,
             "created_at": timestamp
         }
+        
+        # features_path 추가 (있는 경우만)
+        if features_rel is not None:
+            item["features_path"] = features_rel
         
         # 패치 특징 경로 추가 (있는 경우)
         if patch_features_rel is not None:
@@ -138,23 +154,24 @@ class MemorySystem:
         self.index["items"].append(item)
         self._save_index()
         
-        # FAISS 인덱스에 추가
-        if self.faiss_index is None:
-            # 첫 번째 항목이면 인덱스 초기화
-            self.feature_dim = features.shape[0]
-            self.faiss_index = faiss.IndexFlatL2(self.feature_dim)
-        
-        # 특징 정규화 및 추가
-        normalized_features = self._normalize_features(features)
-        normalized_features = normalized_features.reshape(1, -1).astype(np.float32)
-        faiss.normalize_L2(normalized_features)
-        self.faiss_index.add(normalized_features)
-        
-        # ID 매핑 업데이트
-        self.id_to_index_map[memory_id] = len(self.id_to_index_map)
-        
-        # 인덱스 저장
-        faiss.write_index(self.faiss_index, str(self.faiss_index_path))
+        # FAISS 인덱스에 추가 (features가 제공된 경우만)
+        if features is not None:
+            if self.faiss_index is None:
+                # 첫 번째 항목이면 인덱스 초기화
+                self.feature_dim = features.shape[0]
+                self.faiss_index = faiss.IndexFlatL2(self.feature_dim)
+            
+            # 특징 정규화 및 추가
+            normalized_features = self._normalize_features(features)
+            normalized_features = normalized_features.reshape(1, -1).astype(np.float32)
+            faiss.normalize_L2(normalized_features)
+            self.faiss_index.add(normalized_features)
+            
+            # ID 매핑 업데이트
+            self.id_to_index_map[memory_id] = len(self.id_to_index_map)
+            
+            # 인덱스 저장
+            faiss.write_index(self.faiss_index, str(self.faiss_index_path))
         
         return memory_id
     
@@ -409,37 +426,172 @@ class MemorySystem:
         mask_path = self.memory_dir / item["mask_path"]
         mask = np.array(Image.open(str(mask_path)))
         
-        # 특징 로드
-        features_path = self.memory_dir / item["features_path"]
-        features = np.load(str(features_path))
-        
         result = {
             "item": item,
             "image": image,
             "mask": mask,
-            "features": features
         }
+        
+        # 특징 로드 (있는 경우만)
+        if "features_path" in item:
+            features_path = self.memory_dir / item["features_path"]
+            try:
+                features = np.load(str(features_path), allow_pickle=True)
+                result["features"] = features
+            except Exception as e:
+                print(f"Warning: Failed to load features for item {item_id}: {e}")
+                # features 없이 계속 진행
         
         # 패치 특징 로드 (있는 경우)
         if "patch_features_path" in item:
             patch_features_path = self.memory_dir / item["patch_features_path"]
             if os.path.exists(patch_features_path):
-                patch_features = np.load(str(patch_features_path))
-                result["patch_features"] = patch_features
-                
-                # 패치 정보 로드
-                patch_info_path = self.memory_dir / Path(item["patch_features_path"]).parent / "patch_info.json"
-                if patch_info_path.exists():
-                    with open(patch_info_path, 'r') as f:
-                        patch_info = json.load(f)
-                    result["grid_size"] = tuple(patch_info["grid_size"])
-                    result["resize_scale"] = patch_info["resize_scale"]
+                try:
+                    patch_features = np.load(str(patch_features_path), allow_pickle=True)
+                    result["patch_features"] = patch_features
+                    
+                    # 패치 정보 로드
+                    patch_info_path = self.memory_dir / Path(item["patch_features_path"]).parent / "patch_info.json"
+                    if patch_info_path.exists():
+                        with open(patch_info_path, 'r') as f:
+                            patch_info = json.load(f)
+                        result["grid_size"] = tuple(patch_info["grid_size"])
+                        result["resize_scale"] = patch_info["resize_scale"]
+                except Exception as e:
+                    print(f"Warning: Failed to load patch features for item {item_id}: {e}")
         
         return result
     
     def get_all_items(self) -> List[Dict]:
         """모든 메모리 항목 가져오기"""
         return self.index["items"]
+    
+    def validate_and_clean_index(self) -> int:
+        """
+        인덱스를 검증하고 실제로 존재하지 않는 항목을 제거
+        
+        Returns:
+            제거된 항목의 수
+        """
+        items_to_remove = []
+        
+        for item in self.index["items"]:
+            item_dir = self.memory_dir / f"item_{item['id']}"
+            image_path = self.memory_dir / item["image_path"]
+            
+            # 이미지 파일이나 디렉토리가 존재하지 않으면 제거 대상에 추가
+            if not item_dir.exists() or not image_path.exists():
+                items_to_remove.append(item['id'])
+                print(f"Found orphaned index entry for item {item['id']} (files missing)")
+        
+        # 인덱스에서 제거
+        removed_count = 0
+        for item_id in items_to_remove:
+            for idx, item in enumerate(self.index["items"]):
+                if item["id"] == item_id:
+                    self.index["items"].pop(idx)
+                    removed_count += 1
+                    
+                    # FAISS 인덱스에서도 제거
+                    if item_id in self.id_to_index_map:
+                        self.id_to_index_map.pop(item_id)
+                    break
+        
+        if removed_count > 0:
+            self._save_index()
+            # Don't rebuild FAISS index here to avoid errors
+            # It will be rebuilt when needed
+            print(f"Cleaned {removed_count} orphaned entries from index")
+        
+        return removed_count
+    
+    def delete_memory(self, item_id: int) -> None:
+        """
+        메모리 항목 삭제
+        
+        Args:
+            item_id: 삭제할 항목의 ID
+        """
+        import shutil
+        
+        # Find item in index
+        item = None
+        item_index = None
+        for idx, i in enumerate(self.index["items"]):
+            if i["id"] == item_id:
+                item = i
+                item_index = idx
+                break
+        
+        if item is None:
+            raise ValueError(f"Item ID {item_id} not found")
+        
+        # Delete from filesystem
+        item_dir = self.memory_dir / f"item_{item_id}"
+        if item_dir.exists():
+            try:
+                shutil.rmtree(item_dir)
+            except Exception as e:
+                print(f"Warning: Failed to delete item directory {item_id}: {e}")
+        
+        # Remove from index
+        self.index["items"].pop(item_index)
+        self._save_index()
+        
+        # Remove from FAISS index and rebuild
+        if item_id in self.id_to_index_map:
+            self.id_to_index_map.pop(item_id)
+        
+        # Always rebuild FAISS index after deletion
+        try:
+            self._rebuild_faiss_index()
+        except Exception as e:
+            print(f"Warning: Failed to rebuild FAISS index: {e}")
+        
+        print(f"Deleted memory item ID {item_id}")
+    
+    def delete_all_memory(self) -> None:
+        """모든 메모리 항목 삭제"""
+        import shutil
+        
+        # Delete all item directories
+        for item in self.index["items"]:
+            item_dir = self.memory_dir / f"item_{item['id']}"
+            if item_dir.exists():
+                try:
+                    shutil.rmtree(item_dir)
+                except Exception as e:
+                    print(f"Warning: Failed to delete item directory {item['id']}: {e}")
+        
+        # Reset index
+        self.index["items"] = []
+        self.index["next_id"] = 0
+        self._save_index()
+        
+        # Reset FAISS index
+        self.faiss_index = None
+        self.id_to_index_map = {}
+        try:
+            if self.faiss_index_path.exists():
+                self.faiss_index_path.unlink()
+        except Exception as e:
+            print(f"Warning: Failed to delete FAISS index: {e}")
+        
+        print("Deleted all memory items")
+    
+    def _rebuild_faiss_index(self):
+        """Rebuild FAISS index from scratch"""
+        if not self.index["items"]:
+            self.faiss_index = None
+            self.id_to_index_map = {}
+            if self.faiss_index_path.exists():
+                self.faiss_index_path.unlink()
+            return
+        
+        # Reset and rebuild
+        self.faiss_index = None
+        self.id_to_index_map = {}
+        self._build_faiss_index()
     
     def _compare_patch_features(self, query_features: np.ndarray, item_features: np.ndarray) -> float:
         """
