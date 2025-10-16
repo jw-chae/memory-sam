@@ -185,6 +185,7 @@ class MemorySAMUI:
         file_paths = [f.name for f in files] if isinstance(files, list) else [files.name]
         all_results_data = []
         gallery_images = []
+        skipped_files = []  # 스킵된 파일 추적
         # 결과 저장용 메인 폴더 생성 (단일/다중 파일 처리 공통)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         main_result_dir = Path(self.results_dir) / f"images_{timestamp}"
@@ -203,7 +204,10 @@ class MemorySAMUI:
                 match_background=match_bg,
             )
             if "error" in results:
-                gr.Warning(f"{os.path.basename(file_path)} 처리 실패: {results['error']}")
+                error_file = os.path.basename(file_path)
+                print(f"⚠️  [{error_file}] 스킵됨 - {results['error']}")
+                gr.Warning(f"[{error_file}] 스킵됨 - {results['error']}")
+                skipped_files.append(error_file)
                 continue
 
             # 개별 결과 저장
@@ -232,7 +236,11 @@ class MemorySAMUI:
         # 첫 번째 이미지 결과만 UI에 표시 (메모리 절약)
         first_res = all_results_data[0]
         
-        result_info_text = f"총 {len(all_results_data)}개 처리됨. 결과 저장 위치: {main_result_dir.name}"
+        result_info_text = f"총 {len(all_results_data)}개 처리 완료. 결과 저장 위치: {main_result_dir.name}"
+        if skipped_files:
+            result_info_text += f"\n⚠️  스킵된 파일 {len(skipped_files)}개: {', '.join(skipped_files[:3])}"
+            if len(skipped_files) > 3:
+                result_info_text += f" 외 {len(skipped_files) - 3}개"
         
         # 첫 번째 이미지의 상세 결과를 다시 로드하여 표시 (저장된 파일에서)
         first_image_path = all_results_data[0]["image_path"]
@@ -340,6 +348,7 @@ class MemorySAMUI:
         
         all_results_data = []
         gallery_images = []
+        skipped_files = []  # 스킵된 파일 추적
 
         progress(0, desc="폴더 이미지 처리 시작...")
         for i, file_path in enumerate(image_files):
@@ -354,7 +363,10 @@ class MemorySAMUI:
                 match_background=match_bg,
             )
             if "error" in results:
-                gr.Warning(f"{os.path.basename(file_path)} 처리 실패: {results['error']}")
+                error_file = os.path.basename(file_path)
+                print(f"⚠️  [{error_file}] 스킵됨 - {results['error']}")
+                gr.Warning(f"[{error_file}] 스킵됨 - {results['error']}")
+                skipped_files.append(error_file)
                 continue
             
             # 각 이미지 결과를 개별적으로 저장 (메인 폴더 내에)
@@ -383,7 +395,11 @@ class MemorySAMUI:
         # 첫 번째 이미지 결과만 UI에 표시 (메모리 절약)
         first_res = all_results_data[0]
         
-        result_info_text = f"폴더 '{folder_name}'에서 {len(all_results_data)}개 처리됨. 결과 저장 위치: {folder_name}_{timestamp}"
+        result_info_text = f"폴더 '{folder_name}'에서 {len(all_results_data)}개 처리 완료. 결과 저장 위치: {folder_name}_{timestamp}"
+        if skipped_files:
+            result_info_text += f"\n⚠️  스킵된 파일 {len(skipped_files)}개: {', '.join(skipped_files[:3])}"
+            if len(skipped_files) > 3:
+                result_info_text += f" 외 {len(skipped_files) - 3}개"
         
         # 첫 번째 이미지의 상세 결과를 다시 로드하여 표시 (저장된 파일에서)
         first_image_path = all_results_data[0]["image_path"]

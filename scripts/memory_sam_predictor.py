@@ -197,7 +197,29 @@ class MemorySAMPredictor:
         print(f"Params: match_background={match_background}, skip_clustering={self.skip_clustering}, kmeans_clusters={self.kmeans_fg_clusters}")
         print("="*50)
 
-        image = np.array(Image.open(image_path).convert("RGB"))
+        # Load image with error handling for corrupted files
+        try:
+            pil_image = Image.open(image_path)
+            pil_image.load()  # Force load to detect truncated files
+            image = np.array(pil_image.convert("RGB"))
+        except (OSError, IOError) as e:
+            error_msg = f"이미지 파일 손상 또는 읽기 실패: {str(e)}"
+            print(f"❌ {error_msg}")
+            return {
+                "error": error_msg,
+                "image_path": image_path,
+                "mask": None,
+                "score": 0.0,
+            }
+        except Exception as e:
+            error_msg = f"이미지 로드 중 예상치 못한 오류: {str(e)}"
+            print(f"❌ {error_msg}")
+            return {
+                "error": error_msg,
+                "image_path": image_path,
+                "mask": None,
+                "score": 0.0,
+            }
         
         # Resize to DINOv3 size for performance optimization
         if self.process_at_dinov3_size:
