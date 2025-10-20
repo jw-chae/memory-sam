@@ -3,7 +3,8 @@
 **A novel memory-enhanced framework that integrates SAM 2, DINOv3, and memory-based retrieval for few-shot tongue segmentation in Traditional Chinese Medicine (TCM) diagnosis.**
 
 # Notice
-dino-v3 requires permission requests, so it has not been made publicly available in the relevant code. Permission requests for the weight files are required on Hugging Face.
+In the initial development version, due to permission requests in dino-v3, the weight file download was not implemented to occur in a single operation. An additional weight file download is required. https://github.com/facebookresearch/dinov3
+The code will be modified in future updates to provide an English UI and enable immediate execution.
 
 It can be used not only for TCM but also for general medical images and datasets such as COCO. Processing time is approximately 15 seconds per image at UHD resolution and approximately 3.5 seconds per image at 1024x768 resolution
 ## Abstract
