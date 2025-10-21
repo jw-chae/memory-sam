@@ -39,7 +39,7 @@ results/
 results_original/
 
 # DINOv3 submodule (managed separately)
-dinov3/
+# dinov3/  # Now included in repository
 
 # Memory data (runtime generated)
 memory/*.npy
