@@ -2,6 +2,11 @@
 
 **A novel memory-enhanced framework that integrates SAM 2, DINOv3, and memory-based retrieval for few-shot tongue segmentation in Traditional Chinese Medicine (TCM) diagnosis.**
 
+# Notice
+In the initial development version, due to permission requests in dino-v3, the weight file download was not implemented to occur in a single operation. An additional weight file download is required. https://github.com/facebookresearch/dinov3
+The code will be modified in future updates to provide an English UI and enable immediate execution.
+
+It can be used not only for TCM but also for general medical images and datasets such as COCO. Processing time is approximately 15 seconds per image at UHD resolution and approximately 3.5 seconds per image at 1024x768 resolution
 ## Abstract
 
 Accurate tongue segmentation is crucial for reliable TCM analysis. Supervised models require large annotated datasets, while SAM-family models remain prompt-driven. We present **Memory-SAM**, a **training-free**, **human-prompt-free** pipeline that automatically generates effective prompts from a small memory of prior cases via dense DINOv3 features and FAISS retrieval. Given a query image, mask-constrained correspondences to the retrieved exemplar are distilled into foreground/background point prompts that guide **SAM2** without manual clicks or model fine-tuning. We evaluate on **600 expert-annotated images** (300 controlled, 300 in-the-wild). On a comprehensive test set, **Memory-SAM** achieves **mIoU 0.9863**, surpassing FCN (0.8188) and a detector-to-box SAM baseline (0.1839). On controlled data, scores above ~0.95 are practically saturated given annotation variability, while our method shows clear gains under real-world conditions. Results indicate that **retrieval-to-prompt** enables data-efficient, robust segmentation of irregular boundaries in tongue imaging.
