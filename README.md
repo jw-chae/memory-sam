@@ -2,6 +2,11 @@
 
 **A novel memory-enhanced framework that integrates SAM 2, DINOv3, and memory-based retrieval for few-shot tongue segmentation in Traditional Chinese Medicine (TCM) diagnosis.**
 
+## Demo
+
+![Memory-SAM Demo](figures/memory-sam-demo.gif)
+*Interactive demonstration of Memory-SAM's segmentation capabilities with memory-guided prompting.*
+
 # Notice
 In the initial development version, due to permission requests in dino-v3, the weight file download was not implemented to occur in a single operation. An additional weight file download is required. https://github.com/facebookresearch/dinov3
 The code will be modified in future updates to provide an English UI and enable immediate execution.
