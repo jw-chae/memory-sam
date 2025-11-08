@@ -168,5 +168,5 @@ Evaluation on the HIT-Tongue-Image test set demonstrates the effectiveness of ou
 | FCN | 0.9919 | 0.9963 | 0.9975 |
 | **U2Net** | **0.9969** | **0.9991** | **0.9990** |
 | Tongue-SAM | 0.9724 | 0.9815 | 0.9889 |
-| **Memory-SAM (Ours)** | **0.9833** | **0.9868** | **0.9944** |
+| **Memory-SAM (Ours)** | **0.9863** | **0.9868** | **0.9944** |
 
