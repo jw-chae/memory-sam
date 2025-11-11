@@ -31,6 +31,7 @@ class MemorySystem:
         self.feature_dim = None
         self.faiss_index = None
         self.id_to_index_map = {}  # Map memory ID to FAISS index
+        self._faiss_normalize_available = True  # Track availability of faiss.normalize_L2
         
         # Clean up orphaned index entries
         self.validate_and_clean_index()
@@ -354,13 +355,13 @@ class MemorySystem:
         if features1 is None or features2 is None or len(features1) == 0 or len(features2) == 0:
             return 0.0
 
-        # Ensure arrays are C-contiguous and float32 for Faiss/sklearn
-        f1 = np.ascontiguousarray(features1, dtype=np.float32)
-        f2 = np.ascontiguousarray(features2, dtype=np.float32)
+        # Ensure arrays are C-contiguous float32 matrices
+        f1 = self._prepare_feature_matrix(features1)
+        f2 = self._prepare_feature_matrix(features2)
 
-        # Normalize features
-        faiss.normalize_L2(f1)
-        faiss.normalize_L2(f2)
+        # Normalize features row-wise (fallback to NumPy if Faiss is incompatible)
+        f1 = self._safe_l2_normalize(f1)
+        f2 = self._safe_l2_normalize(f2)
 
         # Use NearestNeighbors to find average distance (as a measure of similarity)
         # We find the 2 nearest neighbors to avoid matching a point with itself if sets are identical
@@ -373,6 +374,36 @@ class MemorySystem:
         # Convert distance to similarity (e.g., exponential decay)
         similarity = np.exp(-avg_distance * 5.0)
         return similarity
+
+    def _prepare_feature_matrix(self, features: Any) -> np.ndarray:
+        """Ensure features are 2D float32 NumPy arrays for downstream routines."""
+        arr = np.ascontiguousarray(features, dtype=np.float32)
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        elif arr.ndim > 2:
+            arr = arr.reshape(arr.shape[0], -1)
+        return arr
+
+    def _safe_l2_normalize(self, arr: np.ndarray) -> np.ndarray:
+        """Row-wise L2 normalization with graceful fallback when Faiss bindings fail."""
+        if arr.size == 0:
+            return arr
+
+        if self._faiss_normalize_available:
+            try:
+                faiss.normalize_L2(arr)
+                return arr
+            except Exception as e:
+                self._faiss_normalize_available = False
+                if hasattr(self, "log"):
+                    self.log.warning(
+                        "faiss.normalize_L2 failed (%s); falling back to NumPy normalization.",
+                        str(e),
+                    )
+
+        norms = np.linalg.norm(arr, axis=1, keepdims=True)
+        norms = np.where(norms > 0, norms, 1.0)
+        return arr / norms
     
     def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
         """Calculate cosine similarity between two vectors"""
