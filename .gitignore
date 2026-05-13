@@ -1,46 +1,21 @@
-.vscode/
-.DS_Store
-__pycache__/
-*-checkpoint.ipynb
-.venv
-*.egg*
-build/*
-_C.*
-outputs/*
-checkpoints/*.pt
-demo/backend/checkpoints/*.pt
-
-# Weights (added by upload script)
-**/*.pt
-**/*.pth
-**/*.ckpt
-**/*.safetensors
-**/*.onnx
-**/*.h5
-memory/*.bin
-checkpoints/**
-demo/backend/checkpoints/**
-
-# Excluded directories for clean repository
-analyze/
-dinov3_weights/
-processed_result/
-process_code/
-memory/
-assets/
-backup/
-scripts copy/
-tools/
-ui copy/
-training/
-results_5pos/
-results_sota/
+# User-generated data
+user_memory/
 results/
-results_original/
 
-# DINOv3 submodule (managed separately)
-# dinov3/  # Now included in repository
+# Large model assets. Download or symlink them locally.
+assets/dinov3_weights/
+checkpoints/
+third_party/
+configs/
 
-# Memory data (runtime generated)
-memory/*.npy
-memory/item_*/
+# Python/runtime artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environment
+.venv/
+venv/
+*.log
