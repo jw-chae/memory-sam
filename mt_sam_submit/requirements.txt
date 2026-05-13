@@ -1,0 +1,9 @@
+numpy
+opencv-python
+pillow
+torch
+torchvision
+faiss-cpu
+hydra-core
+gradio
+tqdm

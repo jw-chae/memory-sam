@@ -1,172 +1,105 @@
 # Memory-SAM
 
-**A novel memory-enhanced framework that integrates SAM 2, DINOv3, and memory-based retrieval for few-shot tongue segmentation in Traditional Chinese Medicine (TCM) diagnosis.**
+**Memory-SAM: human-prompt-free retrieval-to-prompt tongue segmentation with SAM2.**
 
-## Demo
+Memory-SAM is a training-free, memory-augmented segmentation framework for automatic tongue segmentation. It retrieves labeled exemplars from a memory bank using DINOv3 descriptors, converts mask-constrained feature correspondences into foreground-only SAM2 prompts, and provides a practical UI for memory construction and fully automatic inference.
 
-![Memory-SAM Demo](figures/memory-sam-demo.gif)
-*Interactive demonstration of Memory-SAM's segmentation capabilities with memory-guided prompting.*
-
-# Notice
-In the initial development version, due to permission requests in dino-v3, the weight file download was not implemented to occur in a single operation. An additional weight file download is required. https://github.com/facebookresearch/dinov3
-The code will be modified in future updates to provide an English UI and enable immediate execution.
-
-It can be used not only for TCM but also for general medical images and datasets such as COCO. Processing time is approximately 15 seconds per image at UHD resolution and approximately 3.5 seconds per image at 1024x768 resolution
 ## Abstract
 
-Accurate tongue segmentation is crucial for reliable TCM analysis. Supervised models require large annotated datasets, while SAM-family models remain prompt-driven. We present **Memory-SAM**, a **training-free**, **human-prompt-free** pipeline that automatically generates effective prompts from a small memory of prior cases via dense DINOv3 features and FAISS retrieval. Given a query image, mask-constrained correspondences to the retrieved exemplar are distilled into foreground/background point prompts that guide **SAM2** without manual clicks or model fine-tuning. We evaluate on **600 expert-annotated images** (300 controlled, 300 in-the-wild). On a comprehensive test set, **Memory-SAM** achieves **mIoU 0.9863**, surpassing FCN (0.8188) and a detector-to-box SAM baseline (0.1839). On controlled data, scores above ~0.95 are practically saturated given annotation variability, while our method shows clear gains under real-world conditions. Results indicate that **retrieval-to-prompt** enables data-efficient, robust segmentation of irregular boundaries in tongue imaging.
+Accurate tongue segmentation is a prerequisite for reliable tongue-image analysis in Traditional Chinese Medicine (TCM) and related screening workflows. While supervised segmentation networks can achieve high accuracy, they require substantial pixel-wise annotations and dataset-specific retraining. Recent foundation models such as SAM2 reduce the need for task-specific model development; however, they remain prompt-driven, creating a practical bottleneck for fully automatic deployment. We propose **Memory-SAM**, a human-prompt-free retrieval-to-prompt framework for automatic tongue segmentation with SAM2. Here, “training-free” means that the framework requires no parameter optimization or task-specific fine-tuning at deployment time, while relying on a labeled memory bank constructed from the training split. Memory-SAM retrieves exemplars from the memory bank using DINOv3 global descriptors, transfers mask-constrained correspondences to generate foreground/background point candidates, and applies contrastive foreground-only prompting for robust SAM2 inference. We evaluate Memory-SAM on the public HIT-Tongue dataset and **SM-Tongue**, a smartphone-captured in-the-wild tongue image benchmark with expert masks. The public SM-Tongue release currently contains **2,334** de-identified 512×512 image/mask pairs. Memory-SAM achieves competitive accuracy in controlled settings and substantially improves robustness over box-based SAM prompting in unconstrained scenes, while eliminating interactive prompting. We release SM-Tongue and the codebase to support reproducible research on automated tongue segmentation.
 
-![Memory-SAM Architecture](figures/fig1_paper_structure.png)
-*Figure 1: Overall architecture of Memory-SAM framework showing the integration of SAM 2, DINOv3, and memory system.*
+## Public Dataset
 
-![Comparison with Existing Methods](figures/fig2_paper_structure_compare.png)
-*Figure 2: Comparison between traditional segmentation approaches and our memory-enhanced framework.*
+SM-Tongue Public Original512 is available on Hugging Face:
 
-## Key Contributions
+- Dataset: https://huggingface.co/datasets/Mark-CHAE/SM-Tongue-Public-Original512
+- Samples: 2,334
+- Image size: 512×512
+- Contents: filtered input images, binary tongue masks, regenerated overlays, metadata, checksums
 
-- **Memory-Enhanced Segmentation**: Novel integration of memory-based retrieval with state-of-the-art segmentation models
-- **DINOv3 Feature Extraction**: Utilization of advanced self-supervised vision transformers for robust feature representation
-- **Few-Shot Learning**: Effective segmentation with limited training data through memory-guided prompting
-- **TCM Application**: Specialized framework for tongue segmentation in Traditional Chinese Medicine diagnosis
-- **Domain Adaptation**: Robust performance across varying imaging conditions and patient demographics
+Download manually from Hugging Face, or with the Hugging Face Hub CLI:
 
-## Experimental Results
-
-Our method demonstrates significant improvements in tongue segmentation accuracy compared to baseline approaches:
-
-![Segmentation Results Example 1](figures/fig6_result_example1.png)
-*Figure 3: Qualitative results showing superior segmentation quality with memory guidance.*
-
-![Segmentation Results Example 2](figures/fig7_result_example2.png)
-*Figure 4: Comparison of segmentation results across different tongue conditions and imaging scenarios.*
-
-## Methodology
-
-### Core Components
-
-Our Memory-SAM framework consists of three integrated components:
-
-1. **SAM 2 Segmentation Model**: Hiera architecture-based segmentation with prompt-guided inference
-2. **DINOv3 Feature Extractor**: Self-supervised vision transformer for robust feature representation
-3. **Memory System**: FAISS-based storage and retrieval of image features, masks, and similarity metrics
-
-### Memory-Guided Segmentation Process
-
-The segmentation process follows a five-step pipeline:
-
-1. **Feature Extraction**: DINOv3 extracts both global (CLS token) and patch-level features from input images
-2. **Memory Retrieval**: FAISS-based similarity search identifies the most relevant historical cases
-3. **Prompt Generation**: Retrieved masks generate point and bounding box prompts for SAM 2
-4. **Segmentation**: SAM 2 performs prompt-guided segmentation with multiple mask candidates
-5. **Memory Update**: New results are stored in the memory system for future retrieval
-
-## Requirements
-
-- Python 3.11+
-- NVIDIA GPU with CUDA 12.x support
-- PyTorch 2.8+ with CUDA support
-- Dependencies managed via `environment.yml` (Conda) and `pyproject.toml`
-
-## Installation
-
-### Environment Setup
-
-1. **Create Conda Environment**
 ```bash
-conda env create -f environment.yml
-conda activate memory_sam
+hf download Mark-CHAE/SM-Tongue-Public-Original512 \
+  SM-Tongue-Public-Original512.tar.gz \
+  SM-Tongue-Public-Original512.tar.gz.sha256 \
+  --repo-type dataset
+sha256sum -c SM-Tongue-Public-Original512.tar.gz.sha256
+tar -xzf SM-Tongue-Public-Original512.tar.gz
 ```
 
-2. **Install Package (Development Mode)**
-```bash
-pip install -e .
+## Repository Layout
+
+```text
+memory-sam/
+  mt_sam_submit/       # release-ready Memory-SAM package and UI
+  README.md            # project overview
 ```
 
-3. **Download Pre-trained Models**
+The current release-ready implementation is in `mt_sam_submit/`. The directory name is kept for compatibility with the working submission package, but all user-facing documentation and UI refer to the method as **Memory-SAM**.
 
-Download SAM 2.1 checkpoints to the `checkpoints/` directory:
-- `sam2.1_hiera_large.pt` (recommended for best performance)
-- `sam2.1_hiera_base_plus.pt` (for balanced performance/speed)
+## Quick Start
 
 ```bash
-# Set checkpoint path via environment variable
-export SAM2_CHECKPOINT=/path/to/sam2.1_hiera_large.pt
+git clone https://github.com/jw-chae/memory-sam.git
+cd memory-sam
+
+python -m venv .venv
+source .venv/bin/activate
+pip install -r mt_sam_submit/requirements.txt
+
+python mt_sam_submit/scripts/download_assets.py
 ```
 
-**Note**: SAM 2 models are from Meta AI. DINOv3 models will be automatically downloaded on first use.
-
-## Usage
-
-### Basic Inference
-
-Launch the interactive interface:
+DINOv3 weights require Meta approval. After approval, rerun:
 
 ```bash
-python main.py --share
+python mt_sam_submit/scripts/download_assets.py \
+  --skip-code \
+  --dinov3-weight-url '<URL_FROM_META_APPROVAL_EMAIL>'
 ```
 
-### Command Line Options
+Launch the UI:
 
 ```bash
-python main.py \
-  --model_type hiera_l \
-  --checkpoint_path /path/to/sam2.1_hiera_large.pt \
-  --dinov3_model dinov3_vitl16 \
-  --memory_dir ./memory \
-  --results_dir ./results \
+python mt_sam_submit/ui/app.py \
+  --memory-dir mt_sam_submit/user_memory \
+  --results-dir mt_sam_submit/results \
+  --sam-checkpoint mt_sam_submit/checkpoints/sam2.1_hiera_large.pt \
+  --sam-config configs/sam2.1/sam2.1_hiera_l \
   --device cuda
 ```
 
-### API Usage
+## How Memory-SAM Works
 
-```python
-from memory_sam.memory_sam_predictor import MemorySAMPredictor
+1. Resize the query image to 512×512.
+2. Extract DINOv3 ViT-L/16 global and dense patch descriptors.
+3. Retrieve top memory exemplars from a labeled memory bank using FAISS cosine search.
+4. Select the exemplar with the strongest foreground/background separability.
+5. Build foreground and background similarity maps from mask-constrained reference features.
+6. Compute the contrast map `S(i)=s_fg(i)-s_bg(i)`.
+7. Use the highest-scoring foreground-only contrast points as SAM2 prompts.
+8. Apply fixed mask cleanup: largest component, hole filling, and morphology smoothing.
 
-# Initialize predictor
-predictor = MemorySAMPredictor(
-    model_type="hiera_l",
-    checkpoint_path="checkpoints/sam2.1_hiera_large.pt",
-    dinov3_model="dinov3_vitl16",
-    memory_dir="./memory"
-)
+## UI Features
 
-# Process image with memory guidance
-result = predictor.process_image(image_path, use_memory=True)
-mask = result['mask']
-confidence = result['confidence']
-```
+- Empty user memory by default.
+- Add reference image/mask pairs through the UI.
+- Create memory masks with live SAM2 point-click previews.
+- Run single-image or batch Memory-SAM inference.
+- Inspect retrieved references, prompt points, masks, overlays, and similarity maps.
+- Manage memory items with preview, delete, and clear operations.
 
-## Repository Structure
+## Assets And Licenses
 
-```
-memory-sam/
-├── checkpoints/                 # Pre-trained model weights
-├── configs/                     # Model configuration files
-├── figures/                     # Paper figures and diagrams
-├── memory/                      # Memory storage (FAISS indices)
-├── results/                     # Segmentation outputs
-├── ui/                          # User interface components
-├── memory_sam/                  # Core implementation
-│   ├── memory_sam_predictor.py  # Main predictor class
-│   ├── memory_system.py         # Memory management
-│   ├── dinov3_matcher.py        # DINOv3 feature extraction
-│   └── utils/                   # Utility functions
-├── main.py                      # Interactive demo
-├── environment.yml              # Conda environment
-└── pyproject.toml              # Package configuration
-```
+Memory-SAM uses external foundation-model assets:
 
-## Performance Evaluation
+- SAM2 code/checkpoints: https://github.com/facebookresearch/sam2
+- SAM2.1 Hiera-L checkpoint: https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt
+- DINOv3 code/access: https://github.com/facebookresearch/dinov3
 
-### Quantitative Results
+DINOv3 weights require access approval from Meta. Follow the upstream DINOv3 license and access terms. Do not commit checkpoints, DINOv3 weights, user memory, or results to GitHub.
 
-Evaluation on the HIT-Tongue-Image test set demonstrates the effectiveness of our memory-guided approach:
+## Citation
 
-| Method | mIoU | mPA | Acc |
-|--------|------|-----|-----|
-| UNet | 0.9921 | 0.9961 | 0.9876 |
-| FCN | 0.9919 | 0.9963 | 0.9975 |
-| **U2Net** | **0.9969** | **0.9991** | **0.9990** |
-| Tongue-SAM | 0.9724 | 0.9815 | 0.9889 |
-| **Memory-SAM (Ours)** | **0.9863** | **0.9868** | **0.9944** |
-
+Citation information will be updated after the Memory-SAM paper is public.

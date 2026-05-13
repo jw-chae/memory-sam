@@ -1,0 +1,21 @@
+# User-generated data
+user_memory/
+results/
+
+# Large model assets. Download or symlink them locally.
+assets/dinov3_weights/
+checkpoints/
+third_party/
+configs/
+
+# Python/runtime artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environment
+.venv/
+venv/
+*.log
