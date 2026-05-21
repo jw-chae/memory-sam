@@ -10,6 +10,8 @@ This repository is the cleaned user-facing release package. It is designed to ru
 
 ![Memory-SAM architecture](figures/figure_architecture.png)
 
+![Memory-SAM UI](figures/UI_figure.png)
+
 ## What Is Included
 
 - Paper-aligned Memory-SAM inference pipeline.
