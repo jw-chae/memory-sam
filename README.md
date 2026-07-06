@@ -1,6 +1,5 @@
 # Memory-SAM
 
-**MICCAI 2026 accepted release package** for:
 
 > Memory-SAM: Memory-Augmented Retrieval-to-Prompt for Training-Free Tongue Segmentation
 
