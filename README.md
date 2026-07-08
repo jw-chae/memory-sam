@@ -22,6 +22,7 @@ Memory-SAM is a human-prompt-free retrieval-to-prompt framework for automatic to
 ## Public Links
 
 - Code: https://github.com/jw-chae/memory-sam
+- Paper: https://arxiv.org/abs/2510.15849
 - Dataset: https://huggingface.co/datasets/Mark-CHAE/SM-Tongue-Public-Original512
 
 ## Public Dataset
@@ -305,18 +306,8 @@ Important implementation notes:
 - `mIoU` is the mean of foreground IoU and background IoU.
 - Dice, Precision, and Recall are foreground-only metrics.
 
-## What Not To Commit
-
-The following are intentionally excluded from GitHub:
-
-- `assets/dinov3_weights/`
-- `checkpoints/`
-- `configs/`
-- `third_party/`
-- `user_memory/`
-- `results/`
-- Python cache files and local virtual environments
-
 ## Citation
 
-Citation information will be updated when the Memory-SAM paper is publicly available.
+If you use Memory-SAM or SM-Tongue, please cite the arXiv paper:
+
+- Memory-SAM: https://arxiv.org/abs/2510.15849
