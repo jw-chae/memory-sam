@@ -4,8 +4,6 @@
 
 Memory-SAM is a human-prompt-free retrieval-to-prompt framework for automatic tongue segmentation with SAM2. It uses a small user-provided memory bank of labeled reference images, retrieves transferable exemplars with DINOv3 descriptors, converts mask-constrained correspondences into foreground-only SAM2 point prompts, and returns tongue masks without interactive prompting at inference time.
 
-> **MICCAI 2026 accepted release.** This GitHub repository is the cleaned user-facing Memory-SAM release package. In the local research workspace, the same cleaned package was prepared under `mt_sam_submit/`; on GitHub, the package is exposed at the repository root for easier installation and reading.
-
 ![Memory-SAM architecture](figures/figure_architecture.png)
 
 ![Memory-SAM UI](figures/UI_figure.png)
