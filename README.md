@@ -1,29 +1,23 @@
 # Memory-SAM
 
+**Memory-SAM: Memory-Augmented Retrieval-to-Prompt for Training-Free Tongue Segmentation**
 
-> Memory-SAM: Memory-Augmented Retrieval-to-Prompt for Training-Free Tongue Segmentation
+Memory-SAM is a human-prompt-free retrieval-to-prompt framework for automatic tongue segmentation with SAM2. It uses a small user-provided memory bank of labeled reference images, retrieves transferable exemplars with DINOv3 descriptors, converts mask-constrained correspondences into foreground-only SAM2 point prompts, and returns tongue masks without interactive prompting at inference time.
 
-Memory-SAM is a human-prompt-free, training-free retrieval-to-prompt framework for automatic tongue segmentation with SAM2. Here, **training-free** means that no task-specific parameter optimization or fine-tuning is performed at deployment time. Users provide a small labeled memory bank, and Memory-SAM retrieves references from that memory to generate SAM2 point prompts automatically.
-
-This repository is the cleaned user-facing release package. It is designed to run independently from the original research workspace after assets are prepared.
+> **MICCAI 2026 accepted release.** This GitHub repository is the cleaned user-facing Memory-SAM release package. In the local research workspace, the same cleaned package was prepared under `mt_sam_submit/`; on GitHub, the package is exposed at the repository root for easier installation and reading.
 
 ![Memory-SAM architecture](figures/figure_architecture.png)
 
 ![Memory-SAM UI](figures/UI_figure.png)
 
-## What Is Included
+## Highlights
 
-- Paper-aligned Memory-SAM inference pipeline.
-- English Gradio UI for practical use.
-- Empty user memory by default.
-- Single-image and batch segmentation.
-- Reference image/mask memory management.
-- SAM2 point-mask tool with live mask preview.
-- Memory table, reference image preview, and reference overlay preview.
-- Fixed post-processing to remove small disconnected spill regions and smooth masks.
-- CLI scripts for inference, evaluation, asset setup, and dataset export.
-
-The UI intentionally exposes the best/default paper setting only. Ablation switches are not exposed to end users.
+- **Training-free at deployment:** no task-specific parameter optimization or fine-tuning is performed when using Memory-SAM.
+- **Memory-augmented prompting:** users build a small labeled memory bank; Memory-SAM retrieves references and generates prompts automatically.
+- **SAM2-based segmentation:** the default release uses SAM2.1 Hiera-L with foreground-only point prompts.
+- **DINOv3 retrieval:** the default feature extractor is DINOv3 ViT-L/16 with Meta-approved weights.
+- **Practical UI:** the release includes an English Gradio UI for memory creation, point-mask preview, single-image inference, batch inference, and memory management.
+- **Public benchmark:** SM-Tongue Public Original512 contains **2,155** de-identified `512×512` image/mask pairs.
 
 ## Public Links
 
@@ -32,15 +26,14 @@ The UI intentionally exposes the best/default paper setting only. Ablation switc
 
 ## Public Dataset
 
-The public dataset release is **SM-Tongue Public Original512**. The dataset has been updated to **2,334** image/mask pairs for public release.
+**SM-Tongue Public Original512** is released through Hugging Face.
 
-- Updated public release size: **2,334** image/mask pairs.
-- Paper benchmark size: **2,155** SM-Tongue images used in the paper experiments.
-- Images are filtered source images resized to `512x512`.
-- Masks are binary tongue masks resized to `512x512`.
-- Overlays, metadata, and SHA256 checksums are included.
+- Samples: **2,155** image/mask pairs
+- Image size: `512×512`
+- Contents: input images, binary tongue masks, overlays, metadata, and checksums
+- Intended use: reproducible research on automatic tongue segmentation
 
-Download with Hugging Face CLI:
+Download with the Hugging Face CLI:
 
 ```bash
 pip install -U huggingface_hub
@@ -52,7 +45,7 @@ sha256sum -c SM-Tongue-Public-Original512.tar.gz.sha256
 tar -xzf SM-Tongue-Public-Original512.tar.gz
 ```
 
-## Folder Layout
+## Repository Layout
 
 ```text
 memory-sam/
@@ -60,6 +53,7 @@ memory-sam/
   requirements.txt
   figures/
     figure_architecture.png
+    UI_figure.png
   mt_sam/
     features.py       # DINOv3 feature extraction
     memory.py         # FAISS memory bank and memory manager
@@ -84,9 +78,9 @@ memory-sam/
   results/            # Output masks/overlays/metadata, not committed
 ```
 
-## Environment
+## Installation
 
-On this workstation, use the existing conda environment:
+### Existing Workstation Environment
 
 ```bash
 source /home/jjack/miniconda3/etc/profile.d/conda.sh
@@ -94,11 +88,14 @@ conda activate medsam_env
 cd /media/jjack/Extreme\ SSD/paper_codes/memory-sam
 ```
 
-Important: this machine does not provide a `python` command. Use `python3` globally or use `python` only after activating the conda environment.
+This machine may not provide a global `python` command. Use `python3` globally, or use `python` only after activating the conda environment.
 
-For a new machine:
+### Clean External Machine
 
 ```bash
+git clone https://github.com/jw-chae/memory-sam.git
+cd memory-sam
+
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -U pip
@@ -111,7 +108,7 @@ If using CUDA, install the PyTorch build that matches your CUDA driver before ru
 
 Memory-SAM requires SAM2.1 and DINOv3 assets. These are not committed to GitHub.
 
-Expected local structure:
+Expected runtime structure:
 
 ```text
 memory-sam/
@@ -122,7 +119,7 @@ memory-sam/
   assets/dinov3_weights/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth
 ```
 
-On this workstation, populate assets from the parent research workspace:
+On the original workstation, populate assets from the parent research workspace:
 
 ```bash
 python scripts/setup_assets.py
@@ -134,24 +131,26 @@ Use copies instead of symlinks if needed:
 python scripts/setup_assets.py --copy
 ```
 
-For a clean external machine, download public assets:
+For a clean external machine, download public assets and clone upstream source repos:
 
 ```bash
-python scripts/download_assets.py
+python3 scripts/download_assets.py
 ```
 
-SAM2.1 Hiera-L is downloaded automatically from Meta's public URL. DINOv3 weights require Meta approval. After approval, use either the approved URL:
+SAM2.1 Hiera-L is downloaded automatically from Meta's public URL. **DINOv3 weights are gated by Meta** and must be obtained by each user.
+
+After DINOv3 access approval, use an approved URL:
 
 ```bash
-python scripts/download_assets.py \
+python3 scripts/download_assets.py \
   --skip-code \
   --dinov3-weight-url '<URL_FROM_META_APPROVAL_EMAIL>'
 ```
 
-or a local downloaded file:
+or provide a local downloaded file:
 
 ```bash
-python scripts/download_assets.py \
+python3 scripts/download_assets.py \
   --skip-code \
   --dinov3-weight-file /path/to/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth
 ```
@@ -164,22 +163,24 @@ Official upstream sources:
 
 Users must follow the upstream SAM2 and DINOv3 licenses and access terms.
 
-## Launch UI
+## Launch Memory-SAM UI
 
-Recommended command on this workstation:
+Recommended command from the repository root:
 
 ```bash
-source /home/jjack/miniconda3/etc/profile.d/conda.sh
-conda activate medsam_env
-cd /media/jjack/Extreme\ SSD/paper_codes/memory-sam
-python ui/app.py \
-  --device cuda
+python3 ui/app.py --device cuda
+```
+
+CPU fallback:
+
+```bash
+python3 ui/app.py --device cpu
 ```
 
 Equivalent explicit command:
 
 ```bash
-python ui/app.py \
+python3 ui/app.py \
   --memory-dir user_memory \
   --results-dir results \
   --sam-checkpoint checkpoints/sam2.1_hiera_large.pt \
@@ -187,13 +188,6 @@ python ui/app.py \
   --dinov3-repo third_party/dinov3 \
   --dinov3-weights assets/dinov3_weights \
   --device cuda
-```
-
-If running directly inside the Memory-SAM package folder:
-
-```bash
-cd /media/jjack/Extreme\ SSD/paper_codes/memory-sam
-python ui/app.py --device cuda
 ```
 
 Open the local Gradio URL printed in the terminal, usually:
@@ -218,7 +212,7 @@ Options:
 1. Open the `Segment` tab.
 2. Upload a query image.
 3. Click `Run Memory-SAM`.
-4. Inspect the overlay, binary mask, prompt-point visualization, and debug similarity maps.
+4. Inspect the overlay, binary mask, prompt-point visualization, retrieved reference, and similarity maps.
 
 ### 3. Segment A Batch
 
@@ -244,7 +238,7 @@ Open `Memory Manager` to:
 Single-image inference:
 
 ```bash
-python scripts/infer_image.py \
+python3 scripts/infer_image.py \
   --image /abs/path/query.png \
   --out-mask results/query_mask.png \
   --out-meta results/query_meta.json \
@@ -254,7 +248,7 @@ python scripts/infer_image.py \
 Build memory from a CSV manifest:
 
 ```bash
-python scripts/build_memory.py \
+python3 scripts/build_memory.py \
   --manifest /abs/path/train_memory.csv \
   --memory-dir user_memory \
   --max-items 20 \
@@ -272,7 +266,7 @@ image_path,mask_path
 Evaluate a split:
 
 ```bash
-python scripts/evaluate_split.py \
+python3 scripts/evaluate_split.py \
   --manifest /abs/path/test.csv \
   --memory-dir user_memory \
   --out-dir results/eval \
@@ -285,25 +279,44 @@ Metrics reported:
 mIoU, mPA, Acc, Precision, Recall, Dice, IoU_fg, IoU_bg, latency_ms
 ```
 
-## Method Summary
+## Method And Reproducibility Details
 
 For each query image, Memory-SAM:
 
-1. Resizes the image to `512x512`.
-2. Extracts DINOv3 ViT/16 global and dense patch descriptors.
-3. Retrieves top references from the user memory bank with FAISS cosine search.
+1. Resizes the input image to `512×512`.
+2. Extracts DINOv3 ViT-L/16 global and dense descriptors.
+3. Retrieves top memory references with exact cosine-similarity search.
 4. Reranks retrieved references by foreground/background separability.
-5. Builds foreground/background similarity maps from the selected reference mask.
-6. Builds the contrast map `S(i)=s_fg(i)-s_bg(i)`.
-7. Selects the highest-scoring foreground-only contrast points.
-8. Runs SAM2 with those point prompts.
-9. Keeps the largest connected component, fills holes, and applies fixed morphology cleanup.
+5. Quantizes the selected reference mask to the `32×32` DINO patch grid.
+6. Computes foreground/background similarity maps `s_fg` and `s_bg`.
+7. Builds the contrast map `S(i)=s_fg(i)-s_bg(i)`.
+8. Selects the top `K=3` foreground-only contrast points.
+9. Maps patch prompts to image coordinates by patch centers.
+10. Runs SAM2.1 Hiera-L and selects the mask with the highest predicted IoU.
+11. Applies fixed post-processing: largest connected component, hole filling, and morphology smoothing.
 
-## Reproducibility Notes
+Important implementation notes:
 
-- This package performs no training or fine-tuning.
+- No model training or fine-tuning is performed by Memory-SAM at deployment time.
 - The UI does not expose ablation settings.
 - The memory bank is user-created and starts empty.
 - For paper-style evaluation, never insert test images into memory.
-- Memory quality directly controls retrieval-to-prompt quality.
-- DINOv3 weights are gated by Meta and must be obtained by each user under the official access terms.
+- DINOv3 weights are gated by Meta and must be obtained by each user under official access terms.
+- `mIoU` is the mean of foreground IoU and background IoU.
+- Dice, Precision, and Recall are foreground-only metrics.
+
+## What Not To Commit
+
+The following are intentionally excluded from GitHub:
+
+- `assets/dinov3_weights/`
+- `checkpoints/`
+- `configs/`
+- `third_party/`
+- `user_memory/`
+- `results/`
+- Python cache files and local virtual environments
+
+## Citation
+
+Citation information will be updated when the Memory-SAM paper is publicly available.
